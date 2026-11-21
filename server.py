@@ -46,6 +46,8 @@ LIVE_LOCK = threading.Lock()
 LIVE_PAYLOAD = None
 LIVE_RECEIVED = None
 LIVE_TOKEN = None
+LIVE_RECORDING = False
+LIVE_SESSION = 0
 
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -71,15 +73,20 @@ def ensure_live_token():
 
 
 def read_live_state():
-    """返回监控推送的最新状态；没有推送时 active=false。"""
+    """返回监控推送的最新状态；记录开始/结束由用户在网页上控制。"""
     with LIVE_LOCK:
         payload = LIVE_PAYLOAD
         received = LIVE_RECEIVED
+        recording = LIVE_RECORDING
+        session = LIVE_SESSION
     if not payload:
-        return {"active": False, "age_s": None}
+        return {"active": False, "age_s": None,
+                "recording": recording, "session_id": session}
     result = dict(payload)
     result["age_s"] = (round((datetime.now(timezone.utc) - received)
                              .total_seconds(), 1) if received else None)
+    result["recording"] = recording
+    result["session_id"] = session
     return result
 
 
@@ -309,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_live_update(self):
         """接收实时监控推送的状态；只接受带本机令牌的请求。"""
-        global LIVE_PAYLOAD, LIVE_RECEIVED
+        global LIVE_PAYLOAD, LIVE_RECEIVED, LIVE_RECORDING
 
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -338,7 +345,43 @@ class Handler(BaseHTTPRequestHandler):
         with LIVE_LOCK:
             LIVE_PAYLOAD = payload
             LIVE_RECEIVED = datetime.now(timezone.utc)
-        self._send_json(200, {"ok": True})
+            if payload.get("active") is False:
+                LIVE_RECORDING = False
+            control = {"recording": LIVE_RECORDING,
+                       "session_id": LIVE_SESSION}
+        self._send_json(200, {"ok": True, **control})
+
+    def _handle_live_control(self):
+        """网页上的“开始记录/结束记录”按钮。"""
+        global LIVE_RECORDING, LIVE_SESSION
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json(400, {"error": "请求长度不合法。"})
+            return
+        if length <= 0 or length > 10_000:
+            self._send_json(400, {"error": "请求内容为空或太大。"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(400, {"error": "请求不是合法的 JSON。"})
+            return
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if action not in ("start", "stop"):
+            self._send_json(400, {"error": "action 必须是 start 或 stop。"})
+            return
+        with LIVE_LOCK:
+            if action == "start":
+                LIVE_RECORDING = True
+                LIVE_SESSION += 1
+            else:
+                LIVE_RECORDING = False
+            response = {"recording": LIVE_RECORDING,
+                        "session_id": LIVE_SESSION}
+        self._send_json(200, response)
 
     def _handle_ocr_frame(self):
         parsed = urlsplit(self.path)
@@ -401,6 +444,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/live/update":
             self._handle_live_update()
+            return
+        if path == "/api/live/control":
+            self._handle_live_control()
             return
         if path not in ("/api/analyze", "/api/team", "/api/battle"):
             self._send_json(404, {"error": "找不到这个地址。"})

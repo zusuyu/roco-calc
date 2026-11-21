@@ -199,7 +199,9 @@ class TestHttp(unittest.TestCase):
 
     def test_live_update_requires_token_and_state_endpoint_returns_it(self):
         old_token = server.LIVE_TOKEN
+        old_recording, old_session = server.LIVE_RECORDING, server.LIVE_SESSION
         server.LIVE_TOKEN = "test-live-token"
+        server.LIVE_RECORDING, server.LIVE_SESSION = False, 0
         with server.LIVE_LOCK:
             server.LIVE_PAYLOAD = None
             server.LIVE_RECEIVED = None
@@ -233,9 +235,43 @@ class TestHttp(unittest.TestCase):
             self.assertIsNotNone(payload["age_s"])
         finally:
             server.LIVE_TOKEN = old_token
+            server.LIVE_RECORDING, server.LIVE_SESSION = old_recording, old_session
             with server.LIVE_LOCK:
                 server.LIVE_PAYLOAD = None
                 server.LIVE_RECEIVED = None
+
+    def test_live_control_starts_and_stops_a_session(self):
+        old_recording, old_session = server.LIVE_RECORDING, server.LIVE_SESSION
+        server.LIVE_RECORDING, server.LIVE_SESSION = False, 0
+        try:
+            def control(action):
+                request = urllib.request.Request(
+                    self.base + "/api/live/control",
+                    data=json.dumps({"action": action}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return json.loads(response.read().decode("utf-8"))
+
+            started = control("start")
+            self.assertTrue(started["recording"])
+            self.assertEqual(started["session_id"], 1)
+            stopped = control("stop")
+            self.assertFalse(stopped["recording"])
+            self.assertEqual(stopped["session_id"], 1)
+
+            request = urllib.request.Request(
+                self.base + "/api/live/control",
+                data=json.dumps({"action": "bogus"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.LIVE_RECORDING, server.LIVE_SESSION = old_recording, old_session
 
     def test_index_page(self):
         status, body = self.get("/")

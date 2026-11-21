@@ -118,9 +118,9 @@ class TestStateDiff(unittest.TestCase):
     def test_first_state_lists_both_sides(self):
         events = diff_states(None, state(our=side("水灵", "蓝蓝"),
                                          opponent=side("小独角兽")))
-        self.assertEqual(events, ["我方：水灵（蓝蓝）", "对方：小独角兽"])
+        self.assertEqual(events, ["我方：水灵", "对方：小独角兽"])
 
-    def test_switch_hp_and_energy_are_reported_with_delta(self):
+    def test_confirmed_switch_does_not_report_status_reset_as_damage(self):
         old = state(our=side("水灵", hp=434, max_hp=434, energy=10),
                     opponent=side("小独角兽", percent=100, energy=10))
         new = state(our=side("抹茶布丁", hp=390, max_hp=434, energy=7),
@@ -128,10 +128,20 @@ class TestStateDiff(unittest.TestCase):
         events = diff_states(old, new)
         self.assertIn("我方换精灵：水灵 → 抹茶布丁", events)
         self.assertIn("对方换精灵：小独角兽 → 红丝绒", events)
+        self.assertNotIn("我方生命 434→390（-44）", events)
+        self.assertNotIn("对方生命 100%→82%（-18%）", events)
+        self.assertNotIn("我方能量 10→7（-3）", events)
+
+    def test_damage_and_energy_are_reported_without_a_switch(self):
+        old = state(our=side("水灵", hp=434, max_hp=434, energy=10),
+                    opponent=side("小独角兽", percent=100, energy=10))
+        new = state(our=side("水灵", hp=390, max_hp=434, energy=7),
+                    opponent=side("小独角兽", percent=82, energy=7))
+        events = diff_states(old, new)
         self.assertIn("我方生命 434→390（-44）", events)
         self.assertIn("对方生命 100%→82%（-18%）", events)
         self.assertIn("我方能量 10→7（-3）", events)
-        self.assertNotIn("对方能量 10→10（+0）", events)
+        self.assertIn("对方能量 10→7（-3）", events)
 
     def test_display_name_flicker_is_not_a_pet_switch(self):
         old = state(our=side("水灵", "蓝蓝", hp=434, max_hp=434, energy=10))
@@ -160,7 +170,7 @@ class TestFormat(unittest.TestCase):
             skills=[skill(1, "水泡盾", 1)],
         )
         text = format_state(summary)
-        self.assertIn("我方 水灵（蓝蓝） 434/434 能量10", text)
+        self.assertIn("我方 水灵 434/434 能量10", text)
         self.assertIn("对方 小独角兽 100% 能量10", text)
         self.assertIn("水泡盾(冷却1)", text)
 
@@ -169,8 +179,9 @@ LAYOUT = {
     "our": {"avatar": [34, 16, 111, 88], "display_name": [92, 35, 185, 59],
             "energy": [224, 83, 248, 105], "hp": [135, 60, 205, 80]},
     "opponent": {"avatar": [1337, 21, 1396, 83],
+                 "avatar_match": [1344, 16, 1406, 86],
                  "display_name": [1398, 35, 1458, 60],
-                 "energy": [1419, 84, 1443, 107],
+                 "energy": [1416, 82, 1440, 104],
                  "hp_percent": [1449, 60, 1500, 79]},
     "skills": [{"slot": slot, "name": [200 + slot, 300, 240 + slot, 320],
                 "power": [210 + slot, 300, 250 + slot, 320],
@@ -182,13 +193,14 @@ LAYOUT = {
 
 class TestPush(unittest.TestCase):
     def test_push_without_token_file_reports_missing_token(self):
-        ok, error = push_state(
+        ok, error, control = push_state(
             "http://127.0.0.1:9",
             Path("definitely-missing-live-token"),
             {"active": True},
         )
         self.assertFalse(ok)
         self.assertIn("令牌", error)
+        self.assertEqual(control, {})
 
 
 class TestRegionsAndMerging(unittest.TestCase):
@@ -198,8 +210,9 @@ class TestRegionsAndMerging(unittest.TestCase):
             "identity_our", "identity_opponent", "status_our",
             "status_opponent", "skill_1", "skill_2", "skill_3", "skill_4",
         })
-        # 我方身份区域要包含头像左侧的属性图标和显示名右边界。
-        self.assertEqual(regions["identity_our"], [14, 16, 185, 103])
+        # 身份区域包含属性图标（头像左下方）和单独的头像匹配框。
+        self.assertEqual(regions["identity_our"], [14, 16, 111, 103])
+        self.assertEqual(regions["identity_opponent"], [1317, 16, 1406, 98])
         # 技能区域要包含名字、威力、能耗和冷却四个框。
         self.assertEqual(regions["skill_1"], [201, 300, 271, 320])
 

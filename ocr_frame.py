@@ -48,6 +48,8 @@ def validate_layout(layout, image_size):
                for key in ("display_name", "energy")]
     regions += [layout[side]["avatar"] for side in ("our", "opponent")
                 if "avatar" in layout[side]]
+    regions += [layout[side]["avatar_match"] for side in ("our", "opponent")
+                if "avatar_match" in layout[side]]
     regions += [layout[side][key] for side in ("our", "opponent")
                 for key in ("hp", "hp_percent") if key in layout[side]]
     regions += [skill[key] for skill in skills
@@ -112,7 +114,7 @@ def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=Fa
 
 def clean_label(text):
     """去掉名字末尾的性别/职业图标残影和标点。"""
-    return re.sub(r"[：:，,。.、—–\-♀♂★☆xX\s]+$", "", (text or "").strip())
+    return re.sub(r"[：:，,。.、—–\-?？♀♂★☆xX\s]+$", "", (text or "").strip())
 
 
 # 游戏字体里的“0”是一个圆角方框，文字识别经常读成这些字符。
@@ -188,10 +190,9 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=Fa
     selected = select_number(readings, min_single=min_single, zero_like=zero_like)
     if selected is not None:
         return selected, readings
-    # 重读一旦凑够“两次一致”或单个高置信读数就立即停止，不再固定跑完
-    # 3 个角度 × 4 种变体；最坏情况最多再做 5 次 OCR。
+    # 重读一旦凑够“两次一致”或单个高置信读数就立即停止；确实很难读的
+    # 数字仍然会跑完所有角度和反色变体，不能为了速度牺牲读数。
     height, width = pixels.shape[:2]
-    attempts = 0
     for angle in (-15, 0, 15):
         matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1)
         rotated = cv2.warpAffine(pixels, matrix, (width, height),
@@ -201,13 +202,10 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=Fa
                     cv2.THRESH_BINARY)[1] for channel, threshold in
                     ((gray, 100), (gray, 160), (rotated[:, :, 2], 160))]
         for variant in variants:
-            if attempts >= 5:
-                break
             border = 255 if variant.ndim == 2 else (255, 255, 255)
             variant = cv2.copyMakeBorder(variant, 15, 15, 15, 15,
                         cv2.BORDER_CONSTANT, value=border)
             result = engine(variant, use_det=False, use_cls=False)
-            attempts += 1
             if result.txts:
                 readings.append({"text": result.txts[0],
                                  "confidence": float(result.scores[0])})
@@ -215,8 +213,6 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=Fa
                                          zero_like=zero_like)
                 if selected is not None:
                     return selected, readings
-        if attempts >= 5:
-            break
     return select_number(readings, min_single=min_single,
                          zero_like=zero_like), readings
 
@@ -303,31 +299,27 @@ def load_pool_for(identity):
 
 
 def parse_identity(image, side, layout, engine, avatar_matcher=None, provided=None):
-    """只解析显示名、属性图标和头像；监控在头像/名字区域变化时调用。"""
-    label, label_reading = read_field(
-        image, layout[side]["display_name"], engine, detect_fallback=True
-    )
-    label = clean_label(label)
-    if label_reading.get("text") != label:
-        label_reading["raw_text"] = label_reading.get("text")
-    label_reading["text"] = label
+    """只解析属性图标和头像；显示名可以改，默认不读取、也不参与身份判断。"""
+    label = None
+    label_reading = {"status": "disabled", "text": None,
+                     "confidence": None, "value": None}
     detected_types = None
     avatar = None
     identity = provided
     source = "provided" if provided else None
     if avatar_matcher is not None and "avatar" in layout[side]:
         detected_types = detect_types(image, layout[side]["avatar"])
+        match_box = layout[side].get("avatar_match") or layout[side]["avatar"]
         avatar = avatar_matcher.match(
-            image.crop(layout[side]["avatar"]),
-            label,
+            image.crop(match_box),
+            None,
             min_score=float(layout.get("avatar_min_score", 0.90)),
             min_margin=float(layout.get("avatar_min_margin", 0.08)),
             types=(detected_types or {}).get("pair") or None,
         )
         if identity is None and avatar["identity"] is not None:
             identity = avatar["identity"]
-            source = ("avatar_and_name"
-                      if avatar["status"] == "visual_name_supported" else "avatar")
+            source = "avatar"
     return {
         "label": label, "label_reading": label_reading,
         "types": detected_types, "avatar": avatar,

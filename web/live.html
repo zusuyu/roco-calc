@@ -49,6 +49,19 @@
   .status.off { color: var(--bad); border-color: #6b2f2f; background: #261212; }
   .spacer { flex: 1; }
   a { color: var(--accent); text-decoration: none; }
+  button {
+    background: #223247;
+    color: var(--text);
+    border: 1px solid #3a5069;
+    border-radius: 9px;
+    padding: 7px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #2c4159; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: #1f5c3f; border-color: #2f8a5f; }
+  button.stop { background: #5c2a2a; border-color: #8a3b3b; }
   main { padding: 20px 24px 40px; display: grid; gap: 16px; max-width: 1240px; margin: 0 auto; }
   .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .card {
@@ -88,6 +101,8 @@
   <span id="status" class="status">读取中…</span>
   <span id="session" class="status">会话：—</span>
   <span class="spacer"></span>
+  <button id="start-record" class="primary" type="button">开始记录本场</button>
+  <button id="stop-record" class="stop" type="button">结束记录本场</button>
   <a href="/">返回伤害计算</a>
 </header>
 <main>
@@ -143,11 +158,8 @@ function text(value, fallback = "—") {
 }
 
 function species(side) {
-  if (!side) return "—";
-  const name = side.name ? side.name + (side.form ? `（${side.form}）` : "") : null;
-  const display = side.display;
-  if (name && display && name !== display) return `${name} / ${display}`;
-  return name || display || "未识别";
+  if (!side || !side.name) return "未识别";
+  return side.form ? `${side.name}（${side.form}）` : side.name;
 }
 
 function typesText(side) {
@@ -199,14 +211,19 @@ function renderEvents(events) {
 
 function render(payload) {
   const active = Boolean(payload.active);
+  const recording = Boolean(payload.recording);
   const age = payload.age_s;
   const stale = active && age !== null && age > 5;
   const status = $("status");
   status.className = "status " + (active && !stale ? "on" : "off");
   status.textContent = active
-    ? (stale ? `可能已暂停（${Math.round(age)} 秒没更新）` : `运行中 · ${payload.battle ? "战斗界面" : "等待战斗"}`)
+    ? (recording
+        ? `记录中 · 第 ${payload.session_id} 场${payload.battle ? " · 战斗界面" : ""}`
+        : (stale ? `可能已暂停（${Math.round(age)} 秒没更新）` : "运行中 · 等待开始记录"))
     : "监控未运行";
-  $("session").textContent = payload.session
+  $("start-record").disabled = !active || recording;
+  $("stop-record").disabled = !active || !recording;
+  $("session").textContent = recording && payload.session
     ? `会话：${payload.session.split(/[\\\\/]/).pop()}`
     : "会话：—";
   const state = payload.state || {};
@@ -254,6 +271,23 @@ async function poll() {
   setTimeout(poll, 500);
 }
 
+async function control(action) {
+  try {
+    const response = await fetch("/api/live/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch (error) {
+    const status = $("status");
+    status.className = "status off";
+    status.textContent = `控制失败：${error.message}`;
+  }
+}
+
+$("start-record").addEventListener("click", () => control("start"));
+$("stop-record").addEventListener("click", () => control("stop"));
 poll();
 </script>
 </body>

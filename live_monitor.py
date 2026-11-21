@@ -103,8 +103,10 @@ def build_regions(layout):
         if "avatar" in layout[side]:
             avatar = layout[side]["avatar"]
             boxes.append([avatar[0] - 20, avatar[1], avatar[2], avatar[3] + 15])
-        boxes.append(layout[side]["display_name"])
-        regions[f"identity_{side}"] = _union(boxes)
+        if "avatar_match" in layout[side]:
+            boxes.append(layout[side]["avatar_match"])
+        regions[f"identity_{side}"] = (_union(boxes) if boxes
+                                       else layout[side]["display_name"])
         status_boxes = [layout[side][key] for key in ("hp", "hp_percent", "energy")
                         if key in layout[side]]
         regions[f"status_{side}"] = _union(status_boxes)
@@ -165,10 +167,10 @@ def label_of(side):
     if not side:
         return "未识别"
     name = side.get("name")
-    display = side.get("display")
-    if name and display and name != display:
-        return f"{name}（{display}）"
-    return name or display or "未识别"
+    if name:
+        form = side.get("form")
+        return f"{name}（{form}）" if form else name
+    return side.get("display") or "未识别"
 
 
 def state_summary(result):
@@ -206,10 +208,13 @@ def state_summary(result):
 
 def is_battle_like(summary):
     """菜单页面也可能读出个别字；要求多个战斗 HUD 信号同时存在。"""
+    def present(value):
+        return value is not None and value != ""
+
     our = summary.get("our") or {}
     opponent = summary.get("opponent") or {}
-    signals = sum(value is not None for value in (
-        our.get("name"), our.get("display"), our.get("hp"), our.get("energy"),
+    signals = sum(present(value) for value in (
+        our.get("name"), our.get("hp"), our.get("energy"),
         opponent.get("name"), opponent.get("hp_percent"), opponent.get("energy"),
     ))
     skills = any(skill.get("name") for skill in summary.get("skills") or [])
@@ -229,24 +234,26 @@ def diff_states(previous, current):
         old = previous.get(key) or {}
         new = current.get(key) or {}
         old_label, new_label = label_of(old), label_of(new)
-        old_key = old.get("name") or old.get("display")
-        new_key = new.get("name") or new.get("display")
-        if old_key and new_key and old_key != new_key:
+        # 只有“确认的原名”变化才算换人；显示名可以改、也会读错，不能作依据。
+        switched = bool(old.get("name") and new.get("name")
+                        and old["name"] != new["name"])
+        if switched:
             events.append(f"{prefix}换精灵：{old_label} → {new_label}")
-        if key == "our":
-            if old.get("hp") is not None and new.get("hp") is not None \
-                    and old["hp"] != new["hp"]:
-                delta = new["hp"] - old["hp"]
-                events.append(f"我方生命 {old['hp']}→{new['hp']}（{delta:+d}）")
-        else:
-            if old.get("hp_percent") is not None and new.get("hp_percent") is not None \
-                    and old["hp_percent"] != new["hp_percent"]:
-                delta = new["hp_percent"] - old["hp_percent"]
-                events.append(f"对方生命 {old['hp_percent']}%→{new['hp_percent']}%（{delta:+d}%）")
-        if old.get("energy") is not None and new.get("energy") is not None \
-                and old["energy"] != new["energy"]:
-            delta = new["energy"] - old["energy"]
-            events.append(f"{prefix}能量 {old['energy']}→{new['energy']}（{delta:+d}）")
+        if not switched:
+            if key == "our":
+                if old.get("hp") is not None and new.get("hp") is not None \
+                        and old["hp"] != new["hp"]:
+                    delta = new["hp"] - old["hp"]
+                    events.append(f"我方生命 {old['hp']}→{new['hp']}（{delta:+d}）")
+            else:
+                if old.get("hp_percent") is not None and new.get("hp_percent") is not None \
+                        and old["hp_percent"] != new["hp_percent"]:
+                    delta = new["hp_percent"] - old["hp_percent"]
+                    events.append(f"对方生命 {old['hp_percent']}%→{new['hp_percent']}%（{delta:+d}%）")
+            if old.get("energy") is not None and new.get("energy") is not None \
+                    and old["energy"] != new["energy"]:
+                delta = new["energy"] - old["energy"]
+                events.append(f"{prefix}能量 {old['energy']}→{new['energy']}（{delta:+d}）")
 
     old_skills = {skill.get("slot"): skill for skill in previous.get("skills") or []}
     for skill in current.get("skills") or []:
@@ -446,14 +453,14 @@ def capture_loop(api, hwnd, layout, regions, state, fps, refresh_s, stop_event,
 # ---------- 解析循环 ----------
 
 def push_state(server_url, token_file, payload, timeout=1.0):
-    """把状态推给本地网页服务；不经过共享文件，避免读写并发。"""
+    """把状态推给本地网页服务，并取回“开始/结束记录”的控制状态。"""
     import urllib.error
     import urllib.request
 
     try:
         token = Path(token_file).read_text(encoding="utf-8").strip()
     except OSError:
-        return False, "没有找到实时面板令牌"
+        return False, "没有找到实时面板令牌", {}
     request = urllib.request.Request(
         server_url.rstrip("/") + "/api/live/update",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -463,26 +470,37 @@ def push_state(server_url, token_file, payload, timeout=1.0):
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return 200 <= response.status < 300, None
+            body = response.read()
+            try:
+                control = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                control = {}
+            return 200 <= response.status < 300, None, control
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return False, str(exc)
+        return False, str(exc), {}
 
 
-def parse_loop(state, layout, engine, matcher, session, args, started):
+def parse_loop(state, layout, engine, matcher, args, started):
     from ocr_frame import (parse_identity, parse_skill, parse_status)
 
+    all_groups = set(build_regions(layout))
     summary = empty_state(layout)
     previous_state = None
     event_history = deque(maxlen=50)
     timings = {"groups": 0, "parse_ms": 0.0, "parses": 0, "events": 0}
     last_print = 0.0
     last_log = 0.0
-    last_wait = 0.0
     last_publish = 0.0
     last_push_warning = 0.0
     last_batch_ms = 0.0
-    log_path = session / "state.jsonl"
-    frames_dir = session / "frames"
+    session = None
+    last_session = None
+    session_id = 0
+    recording = False
+    session_started = 0.0
+    session_events = 0
+    log_path = None
+    frames_dir = None
     event_counter = 0
 
     def snapshot():
@@ -490,7 +508,9 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
             stats = dict(state.stats)
         return {
             "active": True,
-            "session": str(session),
+            "recording": recording,
+            "session_id": session_id,
+            "session": str(session) if session else None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_s": round(time.perf_counter() - started, 3),
             "battle": is_battle_like(summary),
@@ -506,12 +526,58 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
             "stats": stats,
         }
 
+    def begin_session(new_id):
+        nonlocal summary, previous_state, session, session_id, recording
+        nonlocal session_started, session_events, log_path, frames_dir, event_counter
+        session_id = new_id
+        recording = True
+        session = session_folder(args.output)
+        log_path = session / "state.jsonl"
+        frames_dir = session / "frames"
+        session_started = time.perf_counter()
+        session_events = 0
+        event_counter = 0
+        summary = empty_state(layout)
+        previous_state = None
+        event_history.clear()
+        with state.condition:
+            state.dirty.update(all_groups)
+            state.condition.notify_all()
+        print(f"开始记录第 {session_id} 场：{session}")
+
+    def end_session(reason):
+        nonlocal recording, session, last_session, log_path, frames_dir
+        if session is not None:
+            last_session = session
+            payload = {
+                "session_id": session_id,
+                "reason": reason,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "elapsed_s": round(time.perf_counter() - session_started, 3),
+                "events": session_events,
+                "state": summary,
+            }
+            (session / "summary.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
+                encoding="utf-8")
+            print(f"结束记录第 {session_id} 场：{session_events} 条变化；目录：{session}")
+        recording = False
+        session = None
+        log_path = None
+        frames_dir = None
+
     def publish():
         nonlocal last_publish, last_push_warning
-        ok, error = push_state(args.server, args.token_file, snapshot())
-        if not ok and time.perf_counter() - last_push_warning > 10:
-            print(f"实时面板没收到状态：{error}（状态仍写入会话日志）")
-            last_push_warning = time.perf_counter()
+        ok, error, control = push_state(args.server, args.token_file, snapshot())
+        if not ok:
+            if time.perf_counter() - last_push_warning > 10:
+                print(f"实时面板没收到状态：{error}（战斗记录仍写会话日志）")
+                last_push_warning = time.perf_counter()
+        else:
+            if control.get("recording") and control.get("session_id") != session_id:
+                begin_session(int(control.get("session_id") or 0))
+            elif not control.get("recording") and recording:
+                end_session("用户在网页结束")
         last_publish = time.perf_counter()
 
     while state.running:
@@ -569,11 +635,11 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
             timings["parses"] += 1
             last_batch_ms = (time.perf_counter() - batch_start) * 1000
 
-            battle = is_battle_like(summary)
-            events = diff_states(previous_state, summary) if battle else []
-            if battle:
+            if recording:
+                events = diff_states(previous_state, summary)
                 previous_state = copy.deepcopy(summary)
                 timings["events"] += len(events)
+                session_events += len(events)
                 for event in events:
                     event_history.append({
                         "elapsed_s": round(elapsed, 1),
@@ -599,14 +665,12 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
                         frames_dir.mkdir(parents=True, exist_ok=True)
                         event_counter += 1
                         frame.save(frames_dir / f"event_{event_counter:04d}_{elapsed:07.1f}s.png")
-            elif elapsed - last_wait >= 10:
-                print("等待战斗界面；当前画面没有完整的战斗 HUD。")
-                last_wait = elapsed
-                previous_state = None
         # 有变化时立即推送；没有变化时每秒推一次心跳，页面据此判断监控还活着。
         if groups or time.perf_counter() - last_publish >= 1.0:
             publish()
-    return summary, timings, list(event_history)
+    if recording:
+        end_session("监控退出")
+    return summary, timings, list(event_history), last_session
 
 
 def session_folder(output):
@@ -668,7 +732,6 @@ def run(args):
         }, ensure_ascii=False, indent=1))
         return 0
 
-    session = session_folder(args.output)
     regions = build_regions(layout)
     state = MonitorState()
     stop_event = threading.Event()
@@ -686,13 +749,14 @@ def run(args):
         duration_timer.daemon = True
         duration_timer.start()
     print(f"实时监控已启动：每 {1 / args.fps:.2f} 秒检查一次画面，"
-          f"只有变化的区域才解析。日志目录：{session}")
+          f"只有变化的区域才解析。请在网页点击“开始记录本场”。")
     summary = empty_state(layout)
     timings = {}
     event_history = []
+    last_session = None
     try:
-        summary, timings, event_history = parse_loop(
-            state, layout, engine, matcher, session, args, started)
+        summary, timings, event_history, last_session = parse_loop(
+            state, layout, engine, matcher, args, started)
     except KeyboardInterrupt:
         print("\n收到停止信号。")
     finally:
@@ -721,11 +785,12 @@ def run(args):
             "events": timings.get("events", 0),
             "failure": state.failure,
         }
-        (session / "summary.json").write_text(
+        (args.output / "monitor_summary.json").write_text(
             json.dumps(summary_payload, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
         push_state(args.server, args.token_file, {
-            "active": False, "session": str(session),
+            "active": False, "recording": False, "session_id": 0,
+            "session": str(last_session) if last_session else None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_s": round(elapsed, 3), "battle": is_battle_like(summary),
             "state": summary, "events": event_history, "timings": timings,
@@ -737,7 +802,8 @@ def run(args):
               f"平均差异比较 {summary_payload['avg_diff_ms']} 毫秒，"
               f"解析 {summary_payload['groups_parsed']} 个区域，"
               f"平均每区域 {summary_payload['avg_parse_ms_per_group']} 毫秒。")
-        print(f"日志目录：{session}")
+        if last_session:
+            print(f"最后一场记录目录：{last_session}")
     return 0
 
 

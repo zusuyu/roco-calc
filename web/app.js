@@ -3871,7 +3871,7 @@ function renderOcrSide(side, info) {
   const title = element(
     "div",
     "ocr-side-title",
-    `${side === "our" ? "我方" : "对方"}：${info.display_name || "（未读到显示名）"}`
+    side === "our" ? "我方" : "对方"
   );
   card.append(title);
   card.append(
