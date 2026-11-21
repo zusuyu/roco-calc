@@ -4018,6 +4018,7 @@ function renderOcrResult(data) {
   grid.append(
     renderOcrSide("our", {
       ...(data.our || {}),
+      skills: data.skills || [],
       skill_identity_candidates: data.skill_identity_candidates || [],
     })
   );
