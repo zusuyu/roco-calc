@@ -19,7 +19,7 @@
 - “当前出战”伤害表使用对局记录推断出的对方范围、当前生命、双方增减益、天气和星陨；对局中也可以点击任意我方/对方位置查看其他对位。未建模的印记/状态会在表上方提示。
 - 队伍卡片只配置精灵、性格、天分和技能；生命、能量、增减益由对局记录提供，不再手动填写。
 
-当前有 **266 个自动测试**，全部通过。
+当前有 **277 个自动测试**，全部通过。
 
 ## 最快上手
 
@@ -86,7 +86,7 @@ web/assets/types/    18 个属性图标（识别头像左下角用）
 PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 ```
 
-应看到 `Ran 266 tests` 和 `OK`。
+应看到 `Ran 277 tests` 和 `OK`。
 
 ### Windows独立持续截图工具
 
@@ -129,6 +129,26 @@ python -m venv .venv-ocr314
 5. 身份确认后，可以选择我方/对方第 1～6 只，点“填入队伍”。OCR 只填精灵和可学技能，不会自动写伤害或回合。
 
 如果状态提示“OCR 环境未安装”，按上面的虚拟环境步骤安装后点“重新检查”。OCR 环境没装好时，主网页和伤害计算仍然正常。
+
+### 实时监控游戏窗口（实验）
+
+游戏保持在前台，运行：
+
+```bash
+.venv-ocr314\Scripts\python live_monitor.py
+```
+
+它会锁定标题含“洛克”的游戏窗口，每 2 秒截取一次内容区域并识别双方精灵、属性、生命、能量、四个技能和冷却；有变化时在控制台打印，并写入 `.cache/live/session_*/state.jsonl`。工具只截图，不读游戏内存、不修改游戏。
+
+常用参数：
+
+```bash
+.venv-ocr314\Scripts\python live_monitor.py --self-test      # 只识别当前一帧
+.venv-ocr314\Scripts\python live_monitor.py --save-frames    # 保留每张识别用的截图
+.venv-ocr314\Scripts\python live_monitor.py --interval 1.5   # 调整识别间隔
+```
+
+伤害浮字、自动回合草稿和自动写入对局记录还没做；这一版先验证“实时截图 + 状态识别”是否稳定。
 
 识别整张图片，或识别已经裁成单行的文字图片：
 
@@ -365,6 +385,7 @@ python crawl_learnsets.py
 | `crawl_learnsets.py` | 抓每只精灵的可学习技能 |
 | `download_assets.py` | 限速下载精灵头像、技能图标和属性图标，生成图片名单 |
 | `type_icons.py` | 识别战斗画面头像左下角的主/副属性图标 |
+| `live_monitor.py` | 实时监控游戏窗口：定时截图、识别双方状态并记录变化 |
 | `data/*.csv` | 已生成并提交的游戏数据 |
 | `data/assets.json` | 精灵/技能到本地图片的对应关系 |
 | `roco_calc.py` | 核心库：面板值、属性倍率、伤害公式 |
