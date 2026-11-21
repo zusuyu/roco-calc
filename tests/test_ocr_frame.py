@@ -64,6 +64,7 @@ class TestStructuredFrame(unittest.TestCase):
         self.assertEqual(clean_label("幻灵菇："), "幻灵菇")
         self.assertEqual(clean_label("蓝蓝—"), "蓝蓝")
         self.assertEqual(clean_label("小独角兽 "), "小独角兽")
+        self.assertEqual(clean_label("岚鸟x"), "岚鸟")
         self.assertEqual(clean_label(None), "")
 
     def test_cooldown_is_kept_separate_from_power_and_energy(self):

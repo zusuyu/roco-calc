@@ -286,34 +286,60 @@ def format_state(summary):
 # ---------- 状态合并 ----------
 
 def apply_identity(summary, side, ident):
+    """识别失败时保留上一次确认的身份；显示名变了才清掉旧身份。"""
     target = summary[side]
-    target["display"] = ident["label"]
+    old_display = target.get("display")
+    new_display = ident["label"]
     identity = ident["identity"]
-    target["name"] = identity["name"] if identity else None
-    target["number"] = identity["number"] if identity else None
-    target["form"] = identity["form"] if identity else None
-    target["identity_source"] = ident["source"]
-    target["types"] = (ident.get("types") or {}).get("pair") or []
+    if identity is not None:
+        target["name"] = identity["name"]
+        target["number"] = identity["number"]
+        target["form"] = identity["form"]
+        target["identity_source"] = ident["source"]
+    elif new_display and new_display != old_display:
+        target["name"] = None
+        target["number"] = None
+        target["form"] = None
+        target["identity_source"] = None
+    target["display"] = new_display
+    types = (ident.get("types") or {}).get("pair") or []
+    if types:
+        target["types"] = types
+    elif new_display and new_display != old_display:
+        target["types"] = []
     target["avatar_status"] = (ident.get("avatar") or {}).get("status")
 
 
 def apply_status(summary, side, status, layout):
+    """读不出的数字不覆盖上一次的值，避免动画遮挡把生命/能量清空。"""
     target = summary[side]
-    target["energy"] = status["energy"]
-    if "hp" in layout[side]:
+    if status.get("energy") is not None:
+        target["energy"] = status["energy"]
+    if "hp" in layout[side] and status.get("hp") is not None:
         target["hp"] = status["hp"]
         target["max_hp"] = status["max_hp"]
-    if "hp_percent" in layout[side]:
+    if "hp_percent" in layout[side] and status.get("hp_percent") is not None:
         target["hp_percent"] = status["hp_percent"]
 
 
 def apply_skill(summary, slot, result):
+    """技能面板被动画挡住时保留上次结果；冷却消失时按 0 更新。"""
     for skill in summary["skills"]:
         if skill["slot"] == slot:
-            skill.update(name=result["name"], category=result["category"],
-                         power=result["power"], energy=result["energy_cost"],
-                         energy_status=result["energy_cost_status"],
-                         cooldown=result["cooldown"])
+            if result.get("name") is not None:
+                skill["name"] = result["name"]
+                skill["category"] = result["category"]
+                skill["power"] = result["power"]
+            if result.get("energy_cost") is not None:
+                skill["energy"] = result["energy_cost"]
+                skill["energy_status"] = result["energy_cost_status"]
+            cooldown_state = result.get("cooldown_status")
+            if cooldown_state == "absent":
+                skill["cooldown"] = None
+            elif cooldown_state == "recognized":
+                skill["cooldown"] = result.get("cooldown")
+            elif result.get("cooldown") is not None:
+                skill["cooldown"] = result["cooldown"]
             return
 
 
@@ -427,12 +453,30 @@ def capture_loop(api, hwnd, layout, regions, state, fps, refresh_s, stop_event,
 
 # ---------- 解析循环 ----------
 
-def write_json_atomic(path, payload):
+def write_json_atomic(path, payload, attempts=20):
+    """网页可能在同时读文件；Windows 上替换失败时重试，最后退回直接写。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n",
-                         encoding="utf-8")
-    temporary.replace(path)
+    body = json.dumps(payload, ensure_ascii=False) + "\n"
+    temporary = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+    temporary.write_text(body, encoding="utf-8")
+    for _ in range(attempts):
+        try:
+            temporary.replace(path)
+            return True
+        except PermissionError:
+            time.sleep(0.01)
+        except OSError:
+            break
+    try:
+        path.write_text(body, encoding="utf-8")
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def write_latest(payload):
@@ -475,8 +519,15 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
             try:
                 if group.startswith("identity_"):
                     side = group.split("_", 1)[1]
+                    before_name = summary["our"].get("name") if side == "our" else None
                     ident = parse_identity(frame, side, layout, engine, matcher)
                     apply_identity(summary, side, ident)
+                    if side == "our" and summary["our"].get("name") != before_name:
+                        # 我方换精灵后旧技能不能继续挂着；等新面板出现再填。
+                        for item in summary["skills"]:
+                            item.update(name=None, category=None, power=None,
+                                        energy=None, energy_status=None,
+                                        cooldown=None)
                 elif group.startswith("status_"):
                     side = group.split("_", 1)[1]
                     status = parse_status(frame, side, layout, engine)
@@ -585,6 +636,8 @@ def load_matcher():
 def run(args):
     import os
 
+    # 让截图线程在 OCR 解析期间也能及时拿到 GIL，尽量接近 0.1 秒一张。
+    sys.setswitchinterval(0.001)
     from windows_capture import WindowsAPI
     from ocr_frame import analyze_frame, validate_layout
 

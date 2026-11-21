@@ -217,10 +217,31 @@ class TestRegionsAndMerging(unittest.TestCase):
         apply_skill(summary, 2, {
             "name": "水炮", "category": "攻击", "power": 93,
             "energy_cost": 3, "energy_cost_status": "recognized",
-            "cooldown": None,
+            "cooldown": 1, "cooldown_status": "recognized",
         })
         self.assertEqual(summary["skills"][1]["name"], "水炮")
         self.assertEqual(summary["skills"][1]["power"], 93)
+        self.assertEqual(summary["skills"][1]["cooldown"], 1)
+        # 面板被动画挡住：名字/能量读不出时保留上次值，冷却消失时才清零。
+        apply_skill(summary, 2, {
+            "name": None, "category": None, "power": None,
+            "energy_cost": None, "energy_cost_status": "unresolved",
+            "cooldown": None, "cooldown_status": "unresolved",
+        })
+        self.assertEqual(summary["skills"][1]["name"], "水炮")
+        self.assertEqual(summary["skills"][1]["energy"], 3)
+        self.assertEqual(summary["skills"][1]["cooldown"], 1)
+        apply_skill(summary, 2, {
+            "name": "水炮", "category": "攻击", "power": 93,
+            "energy_cost": 3, "energy_cost_status": "recognized",
+            "cooldown": None, "cooldown_status": "absent",
+        })
+        self.assertIsNone(summary["skills"][1]["cooldown"])
+        # 生命/能量读不出时保留上一次数值。
+        apply_status(summary, "our", {"energy": None, "hp": None,
+                                      "max_hp": None, "hp_percent": None}, LAYOUT)
+        self.assertEqual(summary["our"]["hp"], 390)
+        self.assertEqual(summary["our"]["energy"], 8)
 
 
 if __name__ == "__main__":

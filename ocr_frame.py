@@ -112,7 +112,7 @@ def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=Fa
 
 def clean_label(text):
     """去掉名字末尾的性别/职业图标残影和标点。"""
-    return re.sub(r"[：:，,。.、—–\-♀♂★☆\s]+$", "", (text or "").strip())
+    return re.sub(r"[：:，,。.、—–\-♀♂★☆xX\s]+$", "", (text or "").strip())
 
 
 # 游戏字体里的“0”是一个圆角方框，文字识别经常读成这些字符。
@@ -382,13 +382,17 @@ def parse_skill(image, region, engine, pool):
     )
     cooldown = None
     cooldown_reading = None
+    cooldown_status = "absent"
     if "cooldown" in region and has_red_glyph(image, region["cooldown"]):
         cooldown, cooldown_reading = read_field(
             image, region["cooldown"], engine, True
         )
+        cooldown_status = ("recognized" if cooldown is not None
+                           else "unresolved")
     result = skill_result(
         region["slot"], rows, power, cost, cost_reading, cooldown
     )
+    result["cooldown_status"] = cooldown_status
     diagnostics = {
         "slot": region["slot"], **detected,
         "power": power_reading, "energy_cost": cost_reading,
