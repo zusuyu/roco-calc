@@ -5,14 +5,13 @@ python ocr_frame.py 参考4.jpg --layout configs/ocr_reference4.json
 """
 
 import argparse
-import csv
 import json
 from functools import lru_cache
 from pathlib import Path
 import re
 import time
 
-from download_ocr import ROOT, load_image, prepare_config
+from download_ocr import load_image, prepare_config
 from ocr_skills import load_skill_pool, recognize
 import roco_calc as rc
 
@@ -215,43 +214,6 @@ def skill_result(slot, readings, displayed_power, energy_cost,
     }
 
 
-@lru_cache(maxsize=1)
-def _learnset_index():
-    by_skill = {}
-    meta = {}
-    path = ROOT / "data" / "learnsets.csv"
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
-            if row.get("category") not in ("攻击", "防御", "状态"):
-                continue
-            key = (row["number"], row["name"], row.get("form") or "")
-            meta[key] = row.get("pet_id")
-            by_skill.setdefault(row["skill_name"], set()).add(key)
-    return by_skill, meta
-
-
-@lru_cache(maxsize=64)
-def skill_identity_candidates(skill_names):
-    """用已确认的四个技能反查可能精灵；只是候选，不自动替换头像身份。"""
-    names = tuple(sorted({name for name in skill_names if name}))
-    if len(names) < 2:
-        return []
-    by_skill, meta = _learnset_index()
-    sets = [by_skill.get(name) for name in names]
-    if any(item is None for item in sets):
-        return []
-    keys = set.intersection(*sets)
-    return [
-        {
-            "number": key[0],
-            "name": key[1],
-            "form": key[2],
-            "pet_id": meta.get(key),
-        }
-        for key in sorted(keys)
-    ]
-
-
 def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=None,
                   debug=False, avatar_matcher=None):
     validate_layout(layout, image.size)
@@ -320,15 +282,6 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
             "slot": region["slot"], **detected,
             "power": power_reading, "energy_cost": cost_reading,
         })
-    skill_candidates = skill_identity_candidates(
-        tuple(
-            skill.get("name")
-            for skill in output["skills"]
-            if skill.get("name")
-        )
-    )
-    if skill_candidates:
-        output["skill_identity_candidates"] = skill_candidates
     if debug:
         diagnostics.update(source_size=list(source_size), viewport=viewport,
                            frame_size=list(image.size))

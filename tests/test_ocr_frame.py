@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ocr_frame import (parse_hp, pet_result, resolve_frame_region, select_number,
-                       skill_identity_candidates, skill_result, validate_layout)
+                       skill_result, validate_layout)
 
 
 class TestStructuredFrame(unittest.TestCase):
@@ -46,13 +46,6 @@ class TestStructuredFrame(unittest.TestCase):
         self.assertIsNone(result["energy_cost"])
         self.assertEqual(result["energy_cost_status"], "database_estimate")
         self.assertEqual(result["energy_cost_estimate"], 2)
-
-    def test_skill_set_candidates_identify_fire_bug_family(self):
-        candidates = skill_identity_candidates(
-            ("引燃", "藤绞", "充分燃烧", "火焰护盾")
-        )
-        names = {item["name"] for item in candidates}
-        self.assertEqual(names, {"柴渣虫", "燃薪虫"})
 
     def test_zero_energy_is_valid_and_ambiguous_numbers_are_rejected(self):
         self.assertEqual(select_number([

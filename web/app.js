@@ -3879,7 +3879,13 @@ function renderOcrSide(side, info) {
       "div",
       "ocr-meta",
       info.name
-        ? `确认身份：${info.name}${info.form ? `（${info.form}）` : ""} · 编号 ${info.number || "?"}`
+        ? `确认身份：${info.name}${info.form ? `（${info.form}）` : ""} · 编号 ${info.number || "?"} · 来源 ${
+            {
+              provided: "手动指定",
+              avatar: "头像",
+              avatar_and_name: "头像+显示名",
+            }[info.identity_source] || info.identity_source || "未知"
+          }`
         : "确认身份：未确认；显示名不能直接当成精灵原名"
     )
   );
@@ -3954,56 +3960,15 @@ function renderOcrSide(side, info) {
     applyOcrPet(side, Number(slotSelect.value), info);
   });
   apply.append(slotSelect, button);
-
-  const candidates = info.skill_identity_candidates || [];
-  if (!info.name && side === "our" && candidates.length) {
-    const candidateSelect = document.createElement("select");
-    for (const candidate of candidates) {
-      const option = document.createElement("option");
-      option.value = `${candidate.number}|${candidate.name}|${candidate.form || ""}`;
-      option.textContent = candidate.form
-        ? `${candidate.name}（${candidate.form}）`
-        : candidate.name;
-      candidateSelect.append(option);
-    }
-    const candidateButton = element(
-      "button",
-      "btn btn-small btn-secondary",
-      "按技能组填入"
-    );
-    candidateButton.type = "button";
-    candidateButton.disabled = battleStarted();
-    candidateButton.addEventListener("click", () => {
-      const [number, name, form] = candidateSelect.value.split("|");
-      applyOcrPet(side, Number(slotSelect.value), {
-        ...info,
-        number,
-        name,
-        form,
-        identity_source: "skill_set",
-      });
-    });
-    apply.append(candidateSelect, candidateButton);
-  }
   card.append(apply);
   if (!info.name) {
-    if (side === "our" && candidates.length) {
-      card.append(
-        element(
-          "p",
-          "hint",
-          "头像未确认，但四个技能与上面的候选精灵完全匹配；请选择正确的一只。"
-        )
-      );
-    } else {
-      card.append(
-        element(
-          "p",
-          "hint",
-          "没有确认身份时，可以在上方 OCR 面板的“我方/对方精灵”里手动指定后重新识别，或直接在队伍卡片里选择。"
-        )
-      );
-    }
+    card.append(
+      element(
+        "p",
+        "hint",
+        "没有确认身份时，可以在上方 OCR 面板的“我方/对方精灵”里手动指定后重新识别，或直接在队伍卡片里选择。"
+      )
+    );
   }
   return card;
 }
@@ -4019,7 +3984,6 @@ function renderOcrResult(data) {
     renderOcrSide("our", {
       ...(data.our || {}),
       skills: data.skills || [],
-      skill_identity_candidates: data.skill_identity_candidates || [],
     })
   );
   grid.append(renderOcrSide("opponent", data.opponent || {}));
