@@ -60,22 +60,46 @@ def validate_layout(layout, image_size):
             raise ValueError(f"布局包含无效裁剪坐标：{box}")
 
 
-def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=False):
-    """只在配置的字段内读取；数字必须完整匹配，不从杂乱字符串提取。"""
+def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=False,
+               detect_fallback=False, scale=3):
+    """只在配置的字段内读取；数字必须完整匹配，不从杂乱字符串提取。
+
+    detect_fallback 用于显示名：短名字旁边常跟着性别/职业小图标，整块识别
+    会把图标读成字符；低置信度时改用文本检测框重读，通常能只框住名字。
+    scale 用来放大小裁剪区；生命数字在 5 倍时更稳定。
+    """
     from PIL import Image
 
     crop = image.crop(region)
-    crop = crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.LANCZOS)
+    crop = crop.resize((crop.width * scale, crop.height * scale),
+                       Image.Resampling.LANCZOS)
     result = engine(crop, use_det=False, use_cls=False)
     text = result.txts[0].strip() if result.txts else None
     confidence = float(result.scores[0]) if result.scores else None
+    if detect_fallback and (confidence is None or confidence < 0.5):
+        wide = (max(0, region[0] - 4), max(0, region[1] - 4),
+                min(image.width, region[2] + 4),
+                min(image.height, region[3] + 4))
+        crop = image.crop(wide)
+        crop = crop.resize((crop.width * 5, crop.height * 5),
+                           Image.Resampling.LANCZOS)
+        detected = engine(crop, use_det=True, use_cls=False, text_score=0.3)
+        if detected.txts:
+            text = detected.txts[0].strip()
+            confidence = float(detected.scores[0])
     reading = {"text": text, "confidence": confidence}
     value = text if confidence is not None and confidence >= 0.5 else None
     if numeric:
         candidate = normalize_zero_like(value) if zero_like else value
-        value = (int(candidate)
-                 if candidate and re.fullmatch(r"[0-9]{1,5}", candidate) else None)
-        if value is None or confidence < 0.85:
+        starred = re.fullmatch(r"[★☆*]\s*([0-9]{1,2})", candidate or "")
+        starred_ok = bool(starred and confidence is not None and confidence >= 0.5)
+        if starred_ok:
+            # 能源徽标常是“星星+数字”，星星是固定 UI，数字部分可以直接采用。
+            value = int(starred.group(1))
+        else:
+            value = (int(candidate)
+                     if candidate and re.fullmatch(r"[0-9]{1,5}", candidate) else None)
+        if not starred_ok and (value is None or confidence < 0.85):
             value, retries = retry_number(
                 image.crop(region), engine, reading, relaxed=relaxed,
                 zero_like=zero_like,
@@ -84,6 +108,11 @@ def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=Fa
     reading["status"] = "recognized" if value is not None else "unresolved"
     reading["value"] = value
     return value, reading
+
+
+def clean_label(text):
+    """去掉名字末尾的性别/职业图标残影和标点。"""
+    return re.sub(r"[：:，,。.、—–\-♀♂★☆\s]+$", "", (text or "").strip())
 
 
 # 游戏字体里的“0”是一个圆角方框，文字识别经常读成这些字符。
@@ -265,11 +294,19 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
     output = {"schema_version": 1, "frame_type": "operation", "skills": []}
     diagnostics = {"pets": {}, "skills": []}
     for side, identity in (("our", our_identity), ("opponent", opponent_identity)):
-        label, label_reading = read_field(image, layout[side]["display_name"], engine)
+        label, label_reading = read_field(
+            image, layout[side]["display_name"], engine, detect_fallback=True
+        )
+        label = clean_label(label)
+        if label_reading.get("text") != label:
+            label_reading["raw_text"] = label_reading.get("text")
+        label_reading["text"] = label
         energy, energy_reading = read_field(
             image, layout[side]["energy"], engine, True, relaxed=True,
-            zero_like=True,
         )
+        detected_types = None
+        if avatar_matcher is not None and "avatar" in layout[side]:
+            detected_types = detect_types(image, layout[side]["avatar"])
         avatar = None
         source = "provided"
         if avatar_matcher is not None and "avatar" in layout[side]:
@@ -278,6 +315,7 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
                 label,
                 min_score=float(layout.get("avatar_min_score", 0.90)),
                 min_margin=float(layout.get("avatar_min_margin", 0.08)),
+                types=(detected_types or {}).get("pair") or None,
             )
             if identity is None and avatar["identity"] is not None:
                 identity = avatar["identity"]
@@ -285,22 +323,25 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
         if side == "our":
             our_identity = identity
         output[side] = pet_result(label, energy, identity, source)
-        if avatar_matcher is not None and "avatar" in layout[side]:
-            # 属性图标只用于展示和核对，暂不参与身份判断。
-            output[side]["types"] = detect_types(image, layout[side]["avatar"])
+        if detected_types is not None:
+            output[side]["types"] = detected_types
         if avatar is not None:
             output[side]["avatar_match"] = avatar
         diagnostics["pets"][side] = {
             "display_name": label_reading, "energy": energy_reading,
         }
         if "hp" in layout[side]:
-            hp_text, hp_reading = read_field(image, layout[side]["hp"], engine)
+            hp_text, hp_reading = read_field(
+                image, layout[side]["hp"], engine, scale=5
+            )
             hp, max_hp = parse_hp(hp_text)
             output[side].update(hp=hp, max_hp=max_hp)
             hp_reading["status"] = "recognized" if hp is not None else "unresolved"
             diagnostics["pets"][side]["hp"] = hp_reading
         if "hp_percent" in layout[side]:
-            text, percent_reading = read_field(image, layout[side]["hp_percent"], engine)
+            text, percent_reading = read_field(
+                image, layout[side]["hp_percent"], engine, scale=5
+            )
             match = re.fullmatch(r"([0-9]{1,3})\s*%", text or "")
             percent = int(match.group(1)) if match else None
             if percent is not None and not 0 <= percent <= 100:

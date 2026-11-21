@@ -15,8 +15,22 @@ CACHE_VERSION = 3
 SCALES = (0.85, 1.0, 1.15)
 
 
-def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=0.08):
-    """名字只核对视觉候选，无法替代头像证据或消除共用头像的歧义。"""
+def _pet_key(pet):
+    return (pet.get("number"), pet.get("name"), pet.get("form"))
+
+
+def _candidate_key(candidate):
+    return tuple(sorted(_pet_key(pet) for pet in candidate.get("pets", ())))
+
+
+def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=0.08,
+                      type_info=None):
+    """名字只核对视觉候选，无法替代头像证据或消除共用头像的歧义。
+
+    同一只精灵的普通/异色头像会分成两个候选，所以分差要跟“下一只不同的
+    精灵”比，而不是跟同一只精灵的另一张头像比。属性识别可信时，候选池已经
+    被属性缩小，可以用更低的分数门槛确认。
+    """
     label = (display_name or "").strip()
     checked = []
     matching_ranks = []
@@ -27,32 +41,44 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
         checked.append(row)
         if matches:
             matching_ranks.append(rank)
-    margin = checked[0]["score"] - checked[1]["score"] if len(checked) > 1 else None
+    top_key = _candidate_key(checked[0]) if checked else None
+    runner = next((row for row in checked[1:]
+                   if _candidate_key(row) != top_key), None)
+    margin = (checked[0]["score"] - runner["score"]
+              if checked and runner is not None else None)
     strong = bool(checked and margin is not None and
                   checked[0]["score"] >= min_score and margin >= min_margin)
     supported = bool(checked and 1 in matching_ranks and margin is not None and
                      margin >= min_margin and checked[0]["score"] >= 0.85 and
                      checked[0].get("feature_inliers", 0) >= 5)
+    type_applied = bool(type_info and type_info.get("applied"))
+    type_pets = int(type_info.get("pets") or 0) if type_applied else 0
+    type_single = bool(type_applied and type_pets == 1 and checked and
+                       checked[0]["score"] >= 0.45)
+    type_lenient = bool(type_applied and 1 < type_pets <= 8 and checked and
+                        checked[0]["score"] >= 0.45 and
+                        margin is not None and margin >= 0.08)
     # 同一精灵的进化形态（例如水灵/圣水守护）长得很像，特征点分数会一起
     # 封顶，最终分差很小；这时用精细色块分和特征点数量的差距补充判断。
     template_gap = (checked[0].get("template_score", 0)
-                    - checked[1].get("template_score", 0)
-                    if len(checked) > 1 else None)
+                    - runner.get("template_score", 0)
+                    if runner is not None else None)
     feature_gap = (checked[0].get("feature_inliers", 0)
-                   - checked[1].get("feature_inliers", 0)
-                   if len(checked) > 1 else None)
+                   - runner.get("feature_inliers", 0)
+                   if runner is not None else None)
     detail = bool(checked and margin is not None and margin < min_margin and
                   checked[0]["score"] >= 0.85 and
                   template_gap is not None and template_gap >= 0.15 and
                   feature_gap is not None and feature_gap >= 5)
+    confirmed = strong or supported or detail or type_single or type_lenient
     identity = (checked[0]["pets"][0]
-                if (strong or supported or detail) and len(checked[0]["pets"]) == 1
-                else None)
-    if (strong or supported or detail) and len(checked[0]["pets"]) > 1:
+                if confirmed and len(checked[0]["pets"]) == 1 else None)
+    if confirmed and len(checked[0]["pets"]) > 1:
         status = "shared_avatar"
     elif identity:
         status = ("visual_supported" if strong else
                   "visual_detail_supported" if detail else
+                  "visual_type_supported" if (type_single or type_lenient) else
                   "visual_name_supported")
     elif matching_ranks:
         status = "name_supported_candidate"
@@ -73,11 +99,19 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
             "template_gap": round(template_gap, 5) if template_gap is not None else None,
             "feature_gap": feature_gap,
         },
+        "type_evidence": {
+            "applied": type_applied,
+            "pets": type_pets,
+            "used": bool(type_single or type_lenient),
+        },
         "thresholds": {"min_score": min_score, "min_margin": min_margin,
                        "name_supported_min_score": 0.85,
                        "name_supported_min_feature_inliers": 5,
                        "detail_min_template_gap": 0.15,
-                       "detail_min_feature_gap": 5},
+                       "detail_min_feature_gap": 5,
+                       "type_supported_min_score": 0.45,
+                       "type_supported_min_margin": 0.08,
+                       "type_supported_max_pets": 8},
         "candidates": checked,
     }
 
@@ -207,15 +241,34 @@ def _geometry(query_points, query_descriptors, points, descriptors):
             "feature_coverage": round(area, 2), "feature_score": round(score, 5)}
 
 
+def _pet_types():
+    """pets.csv 里的属性，作为名单中没有 types 时的后备。"""
+    types = {}
+    path = ROOT / "data" / "pets.csv"
+    if not path.is_file():
+        return types
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            values = [value for value in (row.get("types") or "").split("|") if value]
+            if values:
+                types[(row["number"], row["name"], row["form"])] = values
+    return types
+
+
 def _load_groups(manifest_path):
     pet_ids = {}
     with (ROOT / "data" / "learnsets.csv").open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             pet_ids[(row["number"], row["name"], row["form"])] = row["pet_id"]
+    fallback_types = _pet_types()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     groups = {}
     assets = (ROOT / "web" / "assets" / "pets").resolve()
     for pet in manifest["pets"]:
+        key = (pet["number"], pet["name"], pet["form"])
+        pet_types = pet.get("types")
+        if not isinstance(pet_types, list) or not pet_types:
+            pet_types = fallback_types.get(key, [])
         for avatar_index, avatar in enumerate(
             (pet.get("avatar"), pet.get("shiny_avatar"))
         ):
@@ -226,9 +279,9 @@ def _load_groups(manifest_path):
                 raise ValueError("头像名单包含图片目录以外的路径。")
             group = groups.setdefault(avatar, {
                 "avatar": avatar, "path": path, "pets": [], "shiny": False,
+                "types": set(),
             })
             group["shiny"] = group["shiny"] or avatar_index == 1
-            key = (pet["number"], pet["name"], pet["form"])
             if not any(
                 (item["number"], item["name"], item["form"]) == key
                 for item in group["pets"]
@@ -236,7 +289,9 @@ def _load_groups(manifest_path):
                 group["pets"].append({
                     "pet_id": pet_ids.get(key), "number": pet["number"],
                     "name": pet["name"], "form": pet["form"],
+                    "types": list(pet_types),
                 })
+                group["types"].add(tuple(pet_types))
     return list(groups.values())
 
 
@@ -309,24 +364,55 @@ class AvatarMatcher:
                               for group in range(len(self.groups))]
         self._rank_cache = OrderedDict()
 
-    def rank(self, image, top_k=10):
+    def _type_filter(self, types):
+        """按识别出的属性组合缩小头像候选；找不到就回退到全部头像。"""
+        info = {"requested": list(types) if types else None, "applied": False,
+                "groups": 0, "pets": 0, "order_flipped": False}
+        if not types:
+            return info, None
+
+        def matching(order):
+            want = tuple(order)
+            return {group for group, entry in enumerate(self.groups)
+                    if want in entry["types"]}
+
+        pool = matching(types)
+        if not pool and len(types) == 2 and types[0] != types[1]:
+            pool = matching(list(reversed(types)))
+            info["order_flipped"] = bool(pool)
+        if not pool:
+            return info, None
+        info.update(applied=True, groups=len(pool),
+                    pets=len({_pet_key(pet) for group in pool
+                              for pet in self.groups[group]["pets"]}))
+        return info, pool
+
+    def _rank(self, image, top_k=10, types=None):
         import cv2
         import numpy as np
 
         if not 1 <= top_k <= 20:
             raise ValueError("top_k 必须在 1～20 之间。")
+        type_info, allowed = self._type_filter(types)
         pixels = np.array(image.convert("RGB"))
-        key = hashlib.sha256(str(pixels.shape).encode() + pixels.tobytes()).digest()
+        key = hashlib.sha256(str(pixels.shape).encode() + pixels.tobytes() +
+                             repr(tuple(types or ())).encode()).digest()
         if key in self._rank_cache:
             self._rank_cache.move_to_end(key)
-            return self._rank_cache[key][:top_k]
+            ranked, cached_info = self._rank_cache[key]
+            return ranked[:top_k], dict(cached_info)
         query16 = _features(cv2.resize(pixels, (16, 16), interpolation=cv2.INTER_AREA))
         coarse, _ = _scores(self.coarse_bank, query16)
         all_best = {}
         for variant in np.argsort(coarse)[::-1]:
             group, scale, flip = self.variants[variant]
             all_best.setdefault(group, (scale, flip, float(coarse[variant])))
-        shortlisted = set(list(all_best)[:20])
+        ordered_groups = sorted(all_best, key=lambda group: all_best[group][2],
+                                reverse=True)
+        if allowed is not None:
+            shortlisted = {group for group in ordered_groups[:40] if group in allowed}
+        else:
+            shortlisted = set(ordered_groups[:20])
         query_features = []
         for flip in (False, True):
             gray = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
@@ -345,7 +431,10 @@ class AvatarMatcher:
                         if group not in seen:
                             votes[group] = votes.get(group, 0) + 1 / (1 + match.distance / 100) ** 2
                             seen.add(group)
-                shortlisted.update(sorted(votes, key=votes.get, reverse=True)[:20])
+                voted = sorted(votes, key=votes.get, reverse=True)
+                if allowed is not None:
+                    voted = [group for group in voted if group in allowed]
+                shortlisted.update(voted[:20])
         geometries = {}
         for group in shortlisted:
             indices = self.group_indices[group]
@@ -371,27 +460,40 @@ class AvatarMatcher:
         for group in best:
             indices = np.flatnonzero(np.asarray(variants) == group)
             index = indices[np.argmax(scores[indices])]
+            coarse_score = float(all_best[group][2])
+            base = max(float(scores[index]), geometries[group]["feature_score"])
+            # 炫彩/变色头像的颜色块分数比精细比对更稳；属性已经缩小候选池时，
+            # 把粗粒度色块分也计入最终分。
+            final = max(base, coarse_score) if type_info["applied"] else base
             ranked.append({
                 "avatar": self.groups[group]["avatar"],
                 "pets": self.groups[group]["pets"],
-                "score": round(max(float(scores[index]), geometries[group]["feature_score"]), 5),
+                "score": round(final, 5),
                 "template_score": round(float(scores[index]), 5),
+                "coarse_score": round(coarse_score, 5),
                 "color_score": round(float(parts[index, 0]), 5),
                 "edge_score": round(float(parts[index, 1]), 5),
                 **geometries[group],
             })
         ranked.sort(key=lambda row: row["score"], reverse=True)
-        self._rank_cache[key] = ranked
+        self._rank_cache[key] = (ranked, dict(type_info))
         if len(self._rank_cache) > 8:
             self._rank_cache.popitem(last=False)
-        return ranked[:top_k]
+        return ranked[:top_k], dict(type_info)
 
-    def match(self, image, display_name=None, min_score=0.90, min_margin=0.08):
+    def rank(self, image, top_k=10, types=None):
+        return self._rank(image, top_k, types)[0]
+
+    def match(self, image, display_name=None, min_score=0.90, min_margin=0.08,
+              types=None):
         start = time.perf_counter()
-        result = assess_candidates(self.rank(image), display_name, min_score, min_margin)
+        candidates, type_info = self._rank(image, 10, types)
+        result = assess_candidates(candidates, display_name, min_score, min_margin,
+                                   type_info)
         result.update(elapsed_ms=round((time.perf_counter() - start) * 1000, 1),
                       method="opencv_templates_and_sift",
-                      indexed_avatars=len(self.groups), missing_avatars=self.missing)
+                      indexed_avatars=len(self.groups), missing_avatars=self.missing,
+                      type_filter=type_info)
         return result
 
 

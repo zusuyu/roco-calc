@@ -113,6 +113,34 @@ class TestAvatarNameEvidence(unittest.TestCase):
         self.assertEqual(result["status"], "visual_supported")
         self.assertFalse(result["detail_evidence"]["used"])
 
+    def test_normal_and_shiny_groups_of_one_pet_do_not_count_as_two_pets(self):
+        rows = [candidate("利灯鱼", 0.715, 5, template_score=0.5),
+                candidate("利灯鱼", 0.446, 5, template_score=0.4),
+                candidate("双灯鱼", 0.406, 0, template_score=0.2)]
+        result = assess_candidates(rows, None,
+                                   type_info={"applied": True, "pets": 2})
+        self.assertEqual(result["identity"]["name"], "利灯鱼")
+        self.assertEqual(result["status"], "visual_type_supported")
+        self.assertAlmostEqual(result["score_margin"], 0.309, places=3)
+        self.assertTrue(result["type_evidence"]["used"])
+
+    def test_single_pet_type_pool_can_be_confirmed_without_a_runner_up(self):
+        result = assess_candidates(
+            [candidate("抹茶布丁", 0.586, 0, template_score=0.5)], None,
+            type_info={"applied": True, "pets": 1},
+        )
+        self.assertEqual(result["identity"]["name"], "抹茶布丁")
+        self.assertEqual(result["status"], "visual_type_supported")
+        self.assertIsNone(result["score_margin"])
+
+    def test_type_confidence_is_not_used_for_a_large_pet_pool(self):
+        rows = [candidate("甲", 0.55, 0), candidate("乙", 0.30, 0)]
+        result = assess_candidates(rows, None,
+                                   type_info={"applied": True, "pets": 50})
+        self.assertIsNone(result["identity"])
+        self.assertEqual(result["status"], "needs_review")
+        self.assertFalse(result["type_evidence"]["used"])
+
 
 if __name__ == "__main__":
     unittest.main()

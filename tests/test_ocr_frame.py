@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ocr_frame import (normalize_zero_like, parse_hp, pet_result,
+from ocr_frame import (clean_label, normalize_zero_like, parse_hp, pet_result,
                        resolve_frame_region, select_number, skill_result,
                        validate_layout)
 
@@ -59,6 +59,12 @@ class TestStructuredFrame(unittest.TestCase):
         self.assertEqual(normalize_zero_like("D"), "0")
         self.assertEqual(normalize_zero_like("1D"), "10")
         self.assertEqual(normalize_zero_like("★8"), "★8")
+
+    def test_display_name_cleanup_removes_icon_residue(self):
+        self.assertEqual(clean_label("幻灵菇："), "幻灵菇")
+        self.assertEqual(clean_label("蓝蓝—"), "蓝蓝")
+        self.assertEqual(clean_label("小独角兽 "), "小独角兽")
+        self.assertEqual(clean_label(None), "")
 
     def test_cooldown_is_kept_separate_from_power_and_energy(self):
         defense = skill_result(
