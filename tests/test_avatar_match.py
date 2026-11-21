@@ -79,6 +79,28 @@ class TestAvatarNameEvidence(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertIsNone(result["identity"])
 
+    def test_color_only_forms_are_resolved_by_aligned_color(self):
+        def form(form_name, score, inliers, template_score, color):
+            return {
+                "avatar": form_name + ".png", "score": score,
+                "feature_inliers": inliers, "template_score": template_score,
+                "aligned_color_score": color,
+                "pets": [{"pet_id": "pet_" + form_name, "number": "020",
+                          "name": "岚鸟", "form": form_name}],
+            }
+
+        # 实测：夏天颜色相关 0.755，本来 0.317；两者特征点分数都封顶 0.99。
+        rows = [form("夏天的样子", 0.99, 16, 0.23, 0.755),
+                form("本来的样子", 0.99, 21, 0.51, 0.317)]
+        result = assess_candidates(rows, None,
+                                   type_info={"applied": True, "pets": 4})
+        self.assertEqual(result["identity"]["form"], "夏天的样子")
+        self.assertEqual(result["status"], "visual_detail_supported")
+        self.assertTrue(result["detail_evidence"]["used_color"])
+        self.assertFalse(result["detail_evidence"]["used_template"])
+        self.assertAlmostEqual(result["detail_evidence"]["color_gap"], 0.438,
+                               places=3)
+
     def test_close_scores_can_be_resolved_by_detail_evidence(self):
         # 实测圣水守护：最终分 0.990 / 水灵 0.979，但精细色块分 0.762 / 0.466、
         # 特征点 22 / 10，细节证据足够明确。

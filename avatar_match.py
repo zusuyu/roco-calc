@@ -66,10 +66,22 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
     feature_gap = (checked[0].get("feature_inliers", 0)
                    - runner.get("feature_inliers", 0)
                    if runner is not None else None)
-    detail = bool(checked and margin is not None and margin < min_margin and
-                  checked[0]["score"] >= 0.85 and
-                  template_gap is not None and template_gap >= 0.15 and
-                  feature_gap is not None and feature_gap >= 5)
+    # 线条完全相同、只有颜色不同的形态（如岚鸟的四季样子）在特征点和最终
+    # 分上都会打平；用对齐后的头像颜色相关性补充判断。
+    top_color = checked[0].get("aligned_color_score") if checked else None
+    runner_color = runner.get("aligned_color_score") if runner is not None else None
+    color_gap = (top_color - runner_color
+                 if top_color is not None and runner_color is not None else None)
+    detail_template = bool(
+        checked and margin is not None and margin < min_margin and
+        checked[0]["score"] >= 0.85 and
+        template_gap is not None and template_gap >= 0.15 and
+        feature_gap is not None and feature_gap >= 5)
+    detail_color = bool(
+        checked and margin is not None and margin < min_margin and
+        checked[0]["score"] >= 0.85 and
+        color_gap is not None and color_gap >= 0.12)
+    detail = detail_template or detail_color
     confirmed = strong or supported or detail or type_single or type_lenient
     identity = (checked[0]["pets"][0]
                 if confirmed and len(checked[0]["pets"]) == 1 else None)
@@ -96,8 +108,11 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
         "score_margin": round(margin, 5) if margin is not None else None,
         "detail_evidence": {
             "used": detail,
+            "used_template": detail_template,
+            "used_color": detail_color,
             "template_gap": round(template_gap, 5) if template_gap is not None else None,
             "feature_gap": feature_gap,
+            "color_gap": round(color_gap, 5) if color_gap is not None else None,
         },
         "type_evidence": {
             "applied": type_applied,
@@ -109,6 +124,7 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
                        "name_supported_min_feature_inliers": 5,
                        "detail_min_template_gap": 0.15,
                        "detail_min_feature_gap": 5,
+                       "detail_min_color_gap": 0.12,
                        "type_supported_min_score": 0.45,
                        "type_supported_min_margin": 0.08,
                        "type_supported_max_pets": 8},
@@ -207,7 +223,7 @@ def _geometry(query_points, query_descriptors, points, descriptors):
     import numpy as np
 
     empty = {"feature_inliers": 0, "feature_matches": 0,
-             "feature_coverage": 0.0, "feature_score": 0.0}
+             "feature_coverage": 0.0, "feature_score": 0.0, "_matrix": None}
     if query_descriptors is None or len(descriptors) < 2:
         return empty
     pairs = cv2.BFMatcher().knnMatch(query_descriptors, descriptors, k=2)
@@ -238,7 +254,40 @@ def _geometry(query_points, query_descriptors, points, descriptors):
     if 0.3 < scale < 3.5 and angle < 35 and count >= 4 and area >= 100:
         score = min(0.99, 0.7 + 0.025 * min(count, 10) + 0.05 * count / len(unique))
     return {"feature_inliers": count if score else 0, "feature_matches": len(unique),
-            "feature_coverage": round(area, 2), "feature_score": round(score, 5)}
+            "feature_coverage": round(area, 2), "feature_score": round(score, 5),
+            "_matrix": matrix}
+
+
+def _aligned_color(query_rgb, path, matrix):
+    """先用特征点矩阵把头图对齐，再在头像像素上比颜色。
+
+    线条完全相同的季节/颜色变体在特征点分数上会一起满分；只有对齐后的
+    颜色相关性能区分它们。
+    """
+    import cv2
+    import numpy as np
+
+    if matrix is None or query_rgb is None:
+        return None
+    rgba = _rgba(path)
+    template = cv2.resize(rgba, (256, 256), interpolation=cv2.INTER_AREA)
+    height, width = query_rgb.shape[:2]
+    warped = cv2.warpAffine(template[:, :, :3].astype(np.float32), matrix,
+                            (width, height))
+    alpha = cv2.warpAffine(template[:, :, 3].astype(np.float32), matrix,
+                           (width, height))
+    mask = alpha > 200
+    if int(mask.sum()) < 100:
+        return None
+    template_values = warped[mask]
+    query_values = query_rgb[mask].astype(np.float32)
+    template_centered = template_values - template_values.mean(axis=0)
+    query_centered = query_values - query_values.mean(axis=0)
+    denominator = np.sqrt((template_centered ** 2).sum(axis=0) *
+                          (query_centered ** 2).sum(axis=0))
+    correlations = (template_centered * query_centered).sum(axis=0) / \
+        np.maximum(denominator, 1e-6)
+    return round(float(np.clip(correlations, -1, 1).mean()), 5)
 
 
 def _pet_types():
@@ -414,14 +463,20 @@ class AvatarMatcher:
         else:
             shortlisted = set(ordered_groups[:20])
         query_features = []
+        query_colors = []
         for flip in (False, True):
             gray = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
-            gray = cv2.resize(gray, None, fx=256 / max(gray.shape), fy=256 / max(gray.shape))
+            factor = 256 / max(gray.shape)
+            gray = cv2.resize(gray, None, fx=factor, fy=factor)
+            color = cv2.resize(pixels, (gray.shape[1], gray.shape[0]),
+                               interpolation=cv2.INTER_AREA)
             if flip:
                 gray = cv2.flip(gray, 1)
+                color = cv2.flip(color, 1)
             keypoints, desc = self.sift.detectAndCompute(gray, None)
             points = np.float32([point.pt for point in keypoints]).reshape(-1, 2)
             query_features.append((points, desc))
+            query_colors.append(color)
             votes = {}
             if desc is not None and self.flann is not None:
                 for neighbors in self.flann.knnMatch(desc, k=min(8, len(self.descriptors))):
@@ -440,7 +495,10 @@ class AvatarMatcher:
             indices = self.group_indices[group]
             trials = [_geometry(points, desc, self.points[indices], self.descriptors[indices])
                       for points, desc in query_features]
-            geometries[group] = max(trials, key=lambda trial: trial["feature_score"])
+            best_index = max(range(len(trials)),
+                             key=lambda index: trials[index]["feature_score"])
+            geometries[group] = dict(trials[best_index])
+            geometries[group]["_query_index"] = best_index
         ordered = sorted(shortlisted, key=lambda group: max(
             all_best[group][2], geometries[group]["feature_score"]), reverse=True)[:20]
         best = {group: all_best[group][:2] for group in ordered}
@@ -465,6 +523,10 @@ class AvatarMatcher:
             # 炫彩/变色头像的颜色块分数比精细比对更稳；属性已经缩小候选池时，
             # 把粗粒度色块分也计入最终分。
             final = max(base, coarse_score) if type_info["applied"] else base
+            geometry = geometries[group]
+            aligned_color = _aligned_color(
+                query_colors[geometry.get("_query_index", 0)],
+                self.groups[group]["path"], geometry.get("_matrix"))
             ranked.append({
                 "avatar": self.groups[group]["avatar"],
                 "pets": self.groups[group]["pets"],
@@ -473,9 +535,13 @@ class AvatarMatcher:
                 "coarse_score": round(coarse_score, 5),
                 "color_score": round(float(parts[index, 0]), 5),
                 "edge_score": round(float(parts[index, 1]), 5),
-                **geometries[group],
+                "aligned_color_score": aligned_color,
+                **{key: value for key, value in geometry.items()
+                   if not key.startswith("_")},
             })
-        ranked.sort(key=lambda row: row["score"], reverse=True)
+        ranked.sort(key=lambda row: (row["score"],
+                                     row.get("aligned_color_score") or 0),
+                    reverse=True)
         self._rank_cache[key] = (ranked, dict(type_info))
         if len(self._rank_cache) > 8:
             self._rank_cache.popitem(last=False)
