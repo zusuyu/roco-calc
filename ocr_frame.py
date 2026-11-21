@@ -321,7 +321,11 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
             "power": power_reading, "energy_cost": cost_reading,
         })
     skill_candidates = skill_identity_candidates(
-        [skill.get("name") for skill in output["skills"] if skill.get("name")]
+        tuple(
+            skill.get("name")
+            for skill in output["skills"]
+            if skill.get("name")
+        )
     )
     if skill_candidates:
         output["skill_identity_candidates"] = skill_candidates
