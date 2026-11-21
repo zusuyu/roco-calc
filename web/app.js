@@ -3950,11 +3950,15 @@ function renderOcrSide(side, info) {
     } else {
       cost = "?";
     }
+    const cooldown =
+      skill.cooldown !== null && skill.cooldown !== undefined
+        ? ` · 冷却 ${skill.cooldown} 回合`
+        : "";
     skillList.append(
       element(
         "div",
         "ocr-skill",
-        `${skill.slot}. ${skill.name || "未识别"} · ${category} · 威力 ${power} · 能耗 ${cost}`
+        `${skill.slot}. ${skill.name || "未识别"} · ${category} · 威力 ${power} · 能耗 ${cost}${cooldown}`
       )
     );
   }

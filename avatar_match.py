@@ -33,11 +33,27 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
     supported = bool(checked and 1 in matching_ranks and margin is not None and
                      margin >= min_margin and checked[0]["score"] >= 0.85 and
                      checked[0].get("feature_inliers", 0) >= 5)
-    identity = checked[0]["pets"][0] if (strong or supported) and len(checked[0]["pets"]) == 1 else None
-    if (strong or supported) and len(checked[0]["pets"]) > 1:
+    # 同一精灵的进化形态（例如水灵/圣水守护）长得很像，特征点分数会一起
+    # 封顶，最终分差很小；这时用精细色块分和特征点数量的差距补充判断。
+    template_gap = (checked[0].get("template_score", 0)
+                    - checked[1].get("template_score", 0)
+                    if len(checked) > 1 else None)
+    feature_gap = (checked[0].get("feature_inliers", 0)
+                   - checked[1].get("feature_inliers", 0)
+                   if len(checked) > 1 else None)
+    detail = bool(checked and margin is not None and margin < min_margin and
+                  checked[0]["score"] >= 0.85 and
+                  template_gap is not None and template_gap >= 0.15 and
+                  feature_gap is not None and feature_gap >= 5)
+    identity = (checked[0]["pets"][0]
+                if (strong or supported or detail) and len(checked[0]["pets"]) == 1
+                else None)
+    if (strong or supported or detail) and len(checked[0]["pets"]) > 1:
         status = "shared_avatar"
     elif identity:
-        status = "visual_supported" if strong else "visual_name_supported"
+        status = ("visual_supported" if strong else
+                  "visual_detail_supported" if detail else
+                  "visual_name_supported")
     elif matching_ranks:
         status = "name_supported_candidate"
     else:
@@ -52,9 +68,16 @@ def assess_candidates(candidates, display_name=None, min_score=0.90, min_margin=
         "name_match_ranks": matching_ranks,
         "name_conflict": bool(strong and matching_ranks and 1 not in matching_ranks),
         "score_margin": round(margin, 5) if margin is not None else None,
+        "detail_evidence": {
+            "used": detail,
+            "template_gap": round(template_gap, 5) if template_gap is not None else None,
+            "feature_gap": feature_gap,
+        },
         "thresholds": {"min_score": min_score, "min_margin": min_margin,
                        "name_supported_min_score": 0.85,
-                       "name_supported_min_feature_inliers": 5},
+                       "name_supported_min_feature_inliers": 5,
+                       "detail_min_template_gap": 0.15,
+                       "detail_min_feature_gap": 5},
         "candidates": checked,
     }
 

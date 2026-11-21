@@ -8,8 +8,9 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ocr_frame import (parse_hp, pet_result, resolve_frame_region, select_number,
-                       skill_result, validate_layout)
+from ocr_frame import (normalize_zero_like, parse_hp, pet_result,
+                       resolve_frame_region, select_number, skill_result,
+                       validate_layout)
 
 
 class TestStructuredFrame(unittest.TestCase):
@@ -46,6 +47,31 @@ class TestStructuredFrame(unittest.TestCase):
         self.assertIsNone(result["energy_cost"])
         self.assertEqual(result["energy_cost_status"], "database_estimate")
         self.assertEqual(result["energy_cost_estimate"], 2)
+
+    def test_zero_like_glyphs_are_read_as_zero_only_when_enabled(self):
+        readings = [
+            {"text": "D", "confidence": 0.973},
+            {"text": "口", "confidence": 0.958},
+            {"text": "回", "confidence": 0.922},
+        ]
+        self.assertIsNone(select_number(readings))
+        self.assertEqual(select_number(readings, zero_like=True), 0)
+        self.assertEqual(normalize_zero_like("D"), "0")
+        self.assertEqual(normalize_zero_like("1D"), "10")
+        self.assertEqual(normalize_zero_like("★8"), "★8")
+
+    def test_cooldown_is_kept_separate_from_power_and_energy(self):
+        defense = skill_result(
+            1,
+            [{"name": "水泡盾", "category": "防御", "status": "exact"}],
+            None,
+            0,
+            cooldown=1,
+        )
+        self.assertEqual(defense["category"], "防御")
+        self.assertIsNone(defense["power"])
+        self.assertEqual(defense["energy_cost"], 0)
+        self.assertEqual(defense["cooldown"], 1)
 
     def test_zero_energy_is_valid_and_ambiguous_numbers_are_rejected(self):
         self.assertEqual(select_number([
@@ -118,6 +144,7 @@ class TestStructuredFrame(unittest.TestCase):
         )
         validate_layout(layout, (1602, 932))
         validate_layout(layout, (1600, 900))
+        self.assertTrue(all("cooldown" in skill for skill in layout["skills"]))
 
     def test_title_bar_or_out_of_screen_viewport_is_rejected(self):
         layout = {"image_size": [1600, 900], "screen_size": [1920, 1080]}

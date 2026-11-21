@@ -52,6 +52,7 @@ def validate_layout(layout, image_size):
                 for key in ("hp", "hp_percent") if key in layout[side]]
     regions += [skill[key] for skill in skills
                 for key in ("name", "power", "energy_cost")]
+    regions += [skill["cooldown"] for skill in skills if "cooldown" in skill]
     for box in regions:
         if (len(box) != 4 or not all(type(v) is int for v in box) or not
                 (0 <= box[0] < box[2] <= width and
@@ -59,7 +60,7 @@ def validate_layout(layout, image_size):
             raise ValueError(f"布局包含无效裁剪坐标：{box}")
 
 
-def read_field(image, region, engine, numeric=False, relaxed=False):
+def read_field(image, region, engine, numeric=False, relaxed=False, zero_like=False):
     """只在配置的字段内读取；数字必须完整匹配，不从杂乱字符串提取。"""
     from PIL import Image
 
@@ -71,10 +72,13 @@ def read_field(image, region, engine, numeric=False, relaxed=False):
     reading = {"text": text, "confidence": confidence}
     value = text if confidence is not None and confidence >= 0.5 else None
     if numeric:
-        value = int(value) if value and re.fullmatch(r"[0-9]{1,5}", value) else None
+        candidate = normalize_zero_like(value) if zero_like else value
+        value = (int(candidate)
+                 if candidate and re.fullmatch(r"[0-9]{1,5}", candidate) else None)
         if value is None or confidence < 0.85:
             value, retries = retry_number(
-                image.crop(region), engine, reading, relaxed=relaxed
+                image.crop(region), engine, reading, relaxed=relaxed,
+                zero_like=zero_like,
             )
             reading["retries"] = retries
     reading["status"] = "recognized" if value is not None else "unresolved"
@@ -82,10 +86,43 @@ def read_field(image, region, engine, numeric=False, relaxed=False):
     return value, reading
 
 
-def select_number(readings, min_single=0.9):
+# 游戏字体里的“0”是一个圆角方框，文字识别经常读成这些字符。
+ZERO_GLYPHS = set("DdOoQ口回〇○◯")
+
+
+def normalize_zero_like(text):
+    """把能源徽标里的方形字符还原成 0；只对明确启用该规则的字段调用。"""
+    if not text:
+        return text
+    text = text.strip()
+    if all(char.isdigit() or char in ZERO_GLYPHS for char in text):
+        return "".join("0" if char in ZERO_GLYPHS else char for char in text)
+    return text
+
+
+def has_red_glyph(image, region, threshold=0.10):
+    """冷却数字是红色粗字；没有足够红色就不去 OCR，避免把花纹/闪电读成数字。"""
+    import numpy as np
+
+    crop = np.asarray(image.crop(tuple(region))).astype(np.int16)
+    if crop.ndim != 3 or crop.shape[2] < 3:
+        return False
+    red = crop[:, :, 0]
+    green = crop[:, :, 1]
+    blue = crop[:, :, 2]
+    mask = ((red >= 150) & (green <= 95) & (blue <= 95) &
+            (red - np.maximum(green, blue) >= 60))
+    return float(mask.mean()) >= threshold
+
+
+def select_number(readings, min_single=0.9, zero_like=False):
     groups = {}
     for reading in readings:
         text, score = reading["text"], reading["confidence"]
+        if not text:
+            continue
+        if zero_like:
+            text = normalize_zero_like(text)
         if score >= 0.5 and re.fullmatch(r"[0-9]{1,5}", text):
             groups.setdefault(int(text), []).append(score)
     ranked = sorted(groups, key=lambda number: max(groups[number]), reverse=True)
@@ -100,11 +137,13 @@ def select_number(readings, min_single=0.9):
     return best
 
 
-def retry_number(crop, engine, initial_reading=None, relaxed=False):
-    """低置信度数字做有限次旋转、反色重读，不把 D/O 自动当作 0。
+def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=False):
+    """低置信度数字做有限次旋转、反色重读。
 
-    relaxed 只用于“当前能量”这种值域很小、单个 10 也很可能正确的字段；
-    技能能耗仍使用默认严格阈值，再由技能数据库做低置信度校核。
+    zero_like 只用于能耗字段：游戏把 0 画成方框，识别结果常是 D/口/回。
+    其他数字字段保持严格，不把 D/O 自动当作 0。relaxed 只用于“当前能量”
+    这种值域很小、单个 10 也很可能正确的字段；技能能耗仍使用默认严格阈值，
+    再由技能数据库做低置信度校核。
     """
     import cv2
     import numpy as np
@@ -117,7 +156,7 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False):
     detected = engine(pixels, use_det=True, use_cls=False, text_score=0.3)
     for text, score in zip(detected.txts or (), detected.scores or ()):
         readings.append({"text": text.strip(), "confidence": float(score)})
-    selected = select_number(readings, min_single=min_single)
+    selected = select_number(readings, min_single=min_single, zero_like=zero_like)
     if selected is not None:
         return selected, readings
     height, width = pixels.shape[:2]
@@ -137,7 +176,8 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False):
             if result.txts:
                 readings.append({"text": result.txts[0],
                                  "confidence": float(result.scores[0])})
-    return select_number(readings, min_single=min_single), readings
+    return select_number(readings, min_single=min_single,
+                         zero_like=zero_like), readings
 
 
 def pet_result(display_name, energy, identity=None, identity_source="provided"):
@@ -173,7 +213,7 @@ def _skill_energy(name):
 
 
 def skill_result(slot, readings, displayed_power, energy_cost,
-                 energy_cost_reading=None):
+                 energy_cost_reading=None, cooldown=None):
     """每个固定位置单独组装，缺失识别不能让后面的技能前移。
 
     能耗先采用画面读数；读不出时用技能数据库能耗做低置信度校核。若 OCR
@@ -209,6 +249,7 @@ def skill_result(slot, readings, displayed_power, energy_cost,
         "energy_cost": energy_cost,
         "energy_cost_status": energy_status,
         "energy_cost_estimate": db_energy,
+        "cooldown": cooldown,
         "name_status": row.get("status", "unresolved"),
         "power_status": ("not_applicable" if category in ("防御", "状态")
                          else "recognized" if power is not None else "unresolved"),
@@ -226,7 +267,8 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
     for side, identity in (("our", our_identity), ("opponent", opponent_identity)):
         label, label_reading = read_field(image, layout[side]["display_name"], engine)
         energy, energy_reading = read_field(
-            image, layout[side]["energy"], engine, True, relaxed=True
+            image, layout[side]["energy"], engine, True, relaxed=True,
+            zero_like=True,
         )
         avatar = None
         source = "provided"
@@ -278,13 +320,22 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
             power, power_reading = None, {"status": "not_applicable"}
         else:
             power, power_reading = read_field(image, region["power"], engine, True)
-        cost, cost_reading = read_field(image, region["energy_cost"], engine, True)
+        cost, cost_reading = read_field(
+            image, region["energy_cost"], engine, True, zero_like=True
+        )
+        cooldown = None
+        cooldown_reading = None
+        if "cooldown" in region and has_red_glyph(image, region["cooldown"]):
+            cooldown, cooldown_reading = read_field(
+                image, region["cooldown"], engine, True
+            )
         output["skills"].append(skill_result(
-            region["slot"], rows, power, cost, cost_reading
+            region["slot"], rows, power, cost, cost_reading, cooldown
         ))
         diagnostics["skills"].append({
             "slot": region["slot"], **detected,
             "power": power_reading, "energy_cost": cost_reading,
+            "cooldown": cooldown_reading,
         })
     if debug:
         diagnostics.update(source_size=list(source_size), viewport=viewport,

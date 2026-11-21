@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from avatar_match import _load_groups, assess_candidates
 
 
-def candidate(name, score, inliers=0, shared=None):
+def candidate(name, score, inliers=0, shared=None, template_score=0.0):
     return {"avatar": name + ".png", "score": score, "feature_inliers": inliers,
+            "template_score": template_score,
             "pets": [{"pet_id": "pet_" + value, "name": value,
                       "number": "001", "form": ""}
                      for value in ([name] + (shared or []))]}
@@ -77,6 +78,40 @@ class TestAvatarNameEvidence(unittest.TestCase):
         result = assess_candidates([], "花衣蝶")
         self.assertEqual(result["candidates"], [])
         self.assertIsNone(result["identity"])
+
+    def test_close_scores_can_be_resolved_by_detail_evidence(self):
+        # 实测圣水守护：最终分 0.990 / 水灵 0.979，但精细色块分 0.762 / 0.466、
+        # 特征点 22 / 10，细节证据足够明确。
+        rows = [candidate("圣水守护", 0.99, 22, template_score=0.762),
+                candidate("水灵", 0.979, 10, template_score=0.466)]
+        result = assess_candidates(rows, "蓝蓝")
+        self.assertEqual(result["identity"]["name"], "圣水守护")
+        self.assertEqual(result["status"], "visual_detail_supported")
+        self.assertFalse(result["requires_review"])
+        self.assertTrue(result["detail_evidence"]["used"])
+
+    def test_detail_evidence_does_not_rescue_a_weaker_top_candidate(self):
+        rows = [candidate("水灵", 0.99, 10, template_score=0.466),
+                candidate("圣水守护", 0.979, 22, template_score=0.762)]
+        result = assess_candidates(rows, None)
+        self.assertIsNone(result["identity"])
+        self.assertEqual(result["status"], "needs_review")
+        self.assertFalse(result["detail_evidence"]["used"])
+
+    def test_detail_evidence_needs_both_template_and_feature_gaps(self):
+        rows = [candidate("甲", 0.99, 12, template_score=0.8),
+                candidate("乙", 0.98, 10, template_score=0.6)]
+        self.assertIsNone(assess_candidates(rows, None)["identity"])
+        rows = [candidate("甲", 0.99, 22, template_score=0.6),
+                candidate("乙", 0.98, 10, template_score=0.5)]
+        self.assertIsNone(assess_candidates(rows, None)["identity"])
+
+    def test_clear_margin_still_uses_the_primary_score(self):
+        rows = [candidate("甲", 0.99, 8, template_score=0.4),
+                candidate("乙", 0.90, 30, template_score=0.9)]
+        result = assess_candidates(rows, None)
+        self.assertEqual(result["status"], "visual_supported")
+        self.assertFalse(result["detail_evidence"]["used"])
 
 
 if __name__ == "__main__":
