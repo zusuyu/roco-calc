@@ -182,7 +182,12 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
         avatar = None
         source = "provided"
         if avatar_matcher is not None and "avatar" in layout[side]:
-            avatar = avatar_matcher.match(image.crop(layout[side]["avatar"]), label)
+            avatar = avatar_matcher.match(
+                image.crop(layout[side]["avatar"]),
+                label,
+                min_score=float(layout.get("avatar_min_score", 0.90)),
+                min_margin=float(layout.get("avatar_min_margin", 0.08)),
+            )
             if identity is None and avatar["identity"] is not None:
                 identity = avatar["identity"]
                 source = "avatar_and_name" if avatar["status"] == "visual_name_supported" else "avatar"
