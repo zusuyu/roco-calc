@@ -1381,3 +1381,119 @@ input.invalid {
   font-size: 12px;
   font-weight: 700;
 }
+
+/* OCR 操作帧 */
+.ocr-card {
+  padding: 20px 22px;
+}
+
+.ocr-status {
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ocr-status.ready {
+  border-color: #c9dfc8;
+  background: #f2fbf2;
+  color: #28662a;
+}
+
+.ocr-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ocr-controls .record-field {
+  min-width: 180px;
+}
+
+.ocr-result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ocr-side {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.ocr-side.our {
+  border-color: #cfdefd;
+  background: var(--our-soft);
+}
+
+.ocr-side.opponent {
+  border-color: #f2d1d1;
+  background: var(--opp-soft);
+}
+
+.ocr-side-title {
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.ocr-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ocr-skills {
+  display: grid;
+  gap: 3px;
+  margin-top: 7px;
+}
+
+.ocr-skill {
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.ocr-apply {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ocr-apply select {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.ocr-debug {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  background: #fbfbfc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 10.5px;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .ocr-result-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

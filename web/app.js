@@ -38,6 +38,8 @@ let battleDraftReplacements = { our: null, opp: null };
 let battleStatusText = {};
 let battleDraftSig = "";
 let latestTeamResult = null;
+let ocrStatus = null;
+let ocrResult = null;
 
 function $(id) {
   return document.getElementById(id);
@@ -3743,6 +3745,323 @@ async function importBattle(file) {
   }
 }
 
+function ocrPetSelectOptions() {
+  return [["", "— 未指定 —"]].concat(
+    petOptions.map((item) => [String(item.index), item.label])
+  );
+}
+
+function renderOcrStatus(status) {
+  const box = $("ocr-status");
+  box.replaceChildren();
+  box.classList.toggle("ready", Boolean(status && status.ready));
+  box.append(element("div", "", status ? status.message : "无法读取 OCR 状态。"));
+  if (status && status.layouts) {
+    box.append(
+      element(
+        "div",
+        "hint",
+        `布局：${status.layouts.map((item) => item.label).join("；")}`
+      )
+    );
+  }
+  if (!status || !status.ready) {
+    const retry = element("button", "btn btn-small btn-secondary", "重新检查");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadOcrStatus(true));
+    box.append(retry);
+  }
+  if ($("ocr-run")) {
+    $("ocr-run").disabled = !status || !status.ready;
+  }
+  if (status && status.layouts) {
+    const select = $("ocr-layout");
+    const current = select.value;
+    populateSelect(
+      select,
+      status.layouts.map((item) => [item.id, item.label]),
+      status.layouts.some((item) => item.id === current)
+        ? current
+        : status.layouts[0].id
+    );
+  }
+}
+
+async function loadOcrStatus(force = false) {
+  const box = $("ocr-status");
+  if (box) {
+    box.textContent = "正在检查 OCR 环境…";
+  }
+  try {
+    const response = await fetch(`/api/ocr/status${force ? "?force=1" : ""}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `服务返回了 ${response.status}`);
+    }
+    ocrStatus = data;
+    renderOcrStatus(data);
+  } catch (error) {
+    renderOcrStatus({
+      ready: false,
+      message: `OCR 状态读取失败：${friendlyError(error)}`,
+      layouts: [],
+    });
+  }
+}
+
+function ocrIdentityIndex(info) {
+  if (!info || !info.name) {
+    return -1;
+  }
+  return findPetIndexByRef(info.name, info.form);
+}
+
+function ocrSkillNames(info, petIndex) {
+  const recognized = (info.skills || [])
+    .filter((skill) => skill.name && ["exact", "corrected"].includes(skill.name_status))
+    .map((skill) => skill.name);
+  const kept = filterSkills(petIndex, recognized);
+  const dropped = recognized.filter((name) => !kept.includes(name));
+  return { recognized, kept, dropped };
+}
+
+function applyOcrPet(side, slot, info) {
+  if (battleStarted()) {
+    setBattleStatus("对局已开始，队伍已锁定；请先清空对局再应用 OCR 队伍。", true);
+    return;
+  }
+  const petIndex = ocrIdentityIndex(info);
+  if (petIndex < 0) {
+    setBattleStatus(
+      "OCR 没有确认这只精灵的数据库身份（显示名可能只是玩家昵称），不能自动填入。",
+      true
+    );
+    return;
+  }
+  const { kept, dropped } = ocrSkillNames(info, petIndex);
+  if (side === "our") {
+    const old = state.ourTeam[slot];
+    const slotData =
+      old && old.petIndex === petIndex ? old : freshOurSlot(petIndex);
+    slotData.skills = kept.slice(0, 4);
+    state.ourTeam[slot] = slotData;
+    state.activeOur = slot;
+  } else {
+    const slotData = freshOppSlot(petIndex);
+    slotData.skills = kept;
+    state.oppTeam[slot] = slotData;
+    state.activeOpp = slot;
+  }
+  saveState();
+  renderTeams();
+  refreshActiveStyles();
+  renderBattleCard();
+  scheduleCalculate();
+  const droppedText = dropped.length
+    ? `；未写入不在可学表的技能：${dropped.join("、")}`
+    : "";
+  setBattleStatus(
+    `已把 ${battleSideText(side)} ${info.display_name || info.name} 填入第 ${slot + 1} 只${droppedText}。`,
+    dropped.length > 0
+  );
+}
+
+function renderOcrSide(side, info) {
+  const card = element("div", `ocr-side ${side}`);
+  const title = element(
+    "div",
+    "ocr-side-title",
+    `${side === "our" ? "我方" : "对方"}：${info.display_name || "（未读到显示名）"}`
+  );
+  card.append(title);
+  card.append(
+    element(
+      "div",
+      "ocr-meta",
+      info.name
+        ? `确认身份：${info.name}${info.form ? `（${info.form}）` : ""} · 编号 ${info.number || "?"}`
+        : "确认身份：未确认；显示名不能直接当成精灵原名"
+    )
+  );
+  const readouts = [];
+  if (info.hp !== undefined && info.hp !== null) {
+    readouts.push(`生命 ${info.hp}/${info.max_hp}`);
+  }
+  if (info.hp_percent !== undefined && info.hp_percent !== null) {
+    readouts.push(`生命 ${info.hp_percent}%`);
+  }
+  if (info.energy !== undefined) {
+    readouts.push(`能量 ${info.energy === null ? "未读出" : info.energy}`);
+  }
+  card.append(element("div", "ocr-meta", readouts.join(" · ") || "生命/能量：未读出"));
+  if (info.avatar_match) {
+    card.append(
+      element(
+        "div",
+        "ocr-meta",
+        `头像状态：${info.avatar_match.status} · ${info.avatar_match.requires_review ? "需要确认" : "可参考"}`
+      )
+    );
+  }
+
+  const skillList = element("div", "ocr-skills");
+  for (const skill of info.skills || []) {
+    const category = skill.category || "未识别";
+    const power = skill.power === null || skill.power === undefined
+      ? "无/未读出"
+      : skill.power;
+    const cost = skill.energy_cost === null || skill.energy_cost === undefined
+      ? "?"
+      : skill.energy_cost;
+    skillList.append(
+      element(
+        "div",
+        "ocr-skill",
+        `${skill.slot}. ${skill.name || "未识别"} · ${category} · 威力 ${power} · 能耗 ${cost}`
+      )
+    );
+  }
+  card.append(skillList);
+
+  const apply = element("div", "ocr-apply");
+  const slotSelect = document.createElement("select");
+  for (let index = 0; index < 6; index += 1) {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = `第 ${index + 1} 只`;
+    slotSelect.append(option);
+  }
+  const button = element(
+    "button",
+    "btn btn-small",
+    side === "our" ? "填入我方队伍" : "填入对方队伍"
+  );
+  button.type = "button";
+  button.disabled = battleStarted() || !info.name;
+  button.addEventListener("click", () => {
+    applyOcrPet(side, Number(slotSelect.value), info);
+  });
+  apply.append(slotSelect, button);
+  card.append(apply);
+  if (!info.name) {
+    card.append(
+      element(
+        "p",
+        "hint",
+        "没有确认身份时，可以在上方 OCR 面板的“我方/对方精灵”里手动指定后重新识别，或直接在队伍卡片里选择。"
+      )
+    );
+  }
+  return card;
+}
+
+function renderOcrResult(data) {
+  const box = $("ocr-result");
+  box.replaceChildren();
+  if (!data) {
+    return;
+  }
+  const grid = element("div", "ocr-result-grid");
+  grid.append(renderOcrSide("our", data.our || {}));
+  grid.append(renderOcrSide("opponent", data.opponent || {}));
+  box.append(grid);
+  box.append(
+    element(
+      "p",
+      "hint",
+      "OCR 只填精灵和技能；能量/生命读数用于核对。对局开始后请在回合记录里填写实际状态。"
+    )
+  );
+  if (data.debug) {
+    const details = document.createElement("details");
+    details.append(element("summary", "configure-summary", "OCR 原文与调试信息"));
+    details.append(
+      element("pre", "ocr-debug", JSON.stringify(data.debug, null, 2))
+    );
+    box.append(details);
+  }
+}
+
+async function runOcrFrame() {
+  const file = $("ocr-file").files[0];
+  if (!file) {
+    setOcrError("请先选择一张操作帧截图。", true);
+    return;
+  }
+  if (!ocrStatus || !ocrStatus.ready) {
+    setOcrError("OCR 环境还没有就绪，请先按提示安装/下载模型。", true);
+    return;
+  }
+  const params = new URLSearchParams();
+  params.set("layout", $("ocr-layout").value);
+  const ourIndex = $("ocr-our-pet").value;
+  const oppIndex = $("ocr-opponent-pet").value;
+  if (ourIndex !== "") {
+    const pet = meta.pets[Number(ourIndex)];
+    params.set("our_pet", pet.name);
+    if (pet.form) {
+      params.set("our_form", pet.form);
+    }
+  }
+  if (oppIndex !== "") {
+    const pet = meta.pets[Number(oppIndex)];
+    params.set("opponent_pet", pet.name);
+    if (pet.form) {
+      params.set("opponent_form", pet.form);
+    }
+  }
+  if ($("ocr-no-avatar").checked) {
+    params.set("no_avatar", "1");
+  }
+  if ($("ocr-debug").checked) {
+    params.set("debug", "1");
+  }
+  const button = $("ocr-run");
+  button.disabled = true;
+  setOcrError("OCR 识别中；第一次加载模型会更慢……");
+  try {
+    const response = await fetch(`/api/ocr/frame?${params.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+    if (!response.ok) {
+      throw new Error(data && data.error ? data.error : `服务返回了 ${response.status}`);
+    }
+    ocrResult = data;
+    setOcrError("");
+    renderOcrResult(data);
+  } catch (error) {
+    setOcrError(`OCR 失败：${friendlyError(error)}`, true);
+  } finally {
+    button.disabled = !ocrStatus || !ocrStatus.ready;
+  }
+}
+
+function setOcrError(text, isError = false) {
+  const node = $("ocr-error");
+  node.textContent = text || "";
+  node.classList.toggle("error", Boolean(isError));
+  node.hidden = !text;
+}
+
+function initOcrPanel() {
+  populateSelect($("ocr-our-pet"), ocrPetSelectOptions(), "");
+  populateSelect($("ocr-opponent-pet"), ocrPetSelectOptions(), "");
+  $("ocr-run").addEventListener("click", runOcrFrame);
+  $("ocr-file").addEventListener("change", () => {
+    setOcrError("");
+    $("ocr-result").replaceChildren();
+  });
+  loadOcrStatus();
+}
+
 function initBattleForm() {
   const onChange = () => {
     renderBattleActionSelectors(battlePreSlots());
@@ -4050,6 +4369,7 @@ async function init() {
 
     renderTeams();
     refreshActiveStyles();
+    initOcrPanel();
     initBattleForm();
     saveState();
     setStatus("");

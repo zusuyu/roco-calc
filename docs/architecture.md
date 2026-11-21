@@ -728,6 +728,21 @@ battle.json
 - 技能冷却、技能位置、传动、蓄力和特殊能量技能暂不记录/不推断，但数据结构和代码预留了扩展位置。
 - 特性、其他印记、状态技能的具体效果、特殊攻击技能尚未建模。
 
+## OCR 接入（第二十五步）
+
+OCR 是可选能力，主计算器仍然只依赖 Python 标准库。
+
+- 独立环境：`.venv-ocr314`（RapidOCR 3.10.0、ONNX Runtime 1.32.0、OpenCV headless、Pillow、PyYAML、MSS）。模型在 `models/ocr/`，约 15 MB；环境、模型和上传缓存都被 `.gitignore` 忽略。
+- `ocr_service.py`：
+  - `status()` 检查虚拟环境、依赖、模型、布局和头像；
+  - `run_frame()` 启动 `ocr_frame.py` 子进程识别一张静态操作帧，主服务只解析 JSON；
+  - 布局只允许 `configs/ocr_*.json`，上传图片写到 `.cache/ocr_uploads/`。
+- 接口：
+  - `GET /api/ocr/status`：环境/模型/布局/头像状态。
+  - `POST /api/ocr/frame?layout=...&our_pet=...&debug=1`：请求体是原始图片字节，返回 PR 的固定操作帧 JSON。
+- 网页“OCR 操作帧”卡片：上传截图、识别双方显示名/确认身份/能量/生命/四技能/头像候选；身份确认后可把精灵和可学技能填入我方/对方队伍。不会自动写伤害或回合。
+- 未实现：实时截屏监控、行动提示/伤害浮字自动归属、回合草稿确认。`windows_capture.py` 和视频复核工具仍作为独立命令行工具保留。
+
 ## 代码结构
 
 | 文件 | 作用 |
@@ -747,9 +762,16 @@ battle.json
 | `analyze.py` | 范围推断命令行演示 |
 | `team_demo.py` | 6 对 6 队伍推断的固定例子演示 |
 | `battle_demo.py` | 完整对局日志的固定例子演示 |
-| `server.py` | 本地网页服务：JSON 接口 + 静态页面 |
-| `web/index.html` | 网页结构：双方队伍、当前出战、对局记录 |
-| `web/app.js` | 网页交互：自动重算、对局回合录入、导出/导入、本地保存 |
+| `ocr_frame.py` | 静态操作帧 OCR：双方身份、能量、生命和四技能 |
+| `ocr_skills.py` | 技能名 OCR 与技能池校对 |
+| `avatar_match.py` | 头像 Top 10 检索，显示名只辅助 |
+| `ocr_service.py` | 主服务调用独立 OCR 环境的子进程桥接 |
+| `download_ocr.py` | 下载 PP-OCRv4 模型并生成 CPU 配置 |
+| `review_video.py` / `export_battle_review.py` | 离线视频采样与复核导出 |
+| `windows_capture.py` | Windows MSS 持续截图工具 |
+| `server.py` | 本地网页服务：JSON 接口 + OCR 接口 + 静态页面 |
+| `web/index.html` | 网页结构：双方队伍、当前出战、OCR 操作帧、对局记录 |
+| `web/app.js` | 网页交互：自动重算、OCR 结果、对局回合录入、导出/导入、本地保存 |
 | `web/style.css` | 网页样式 |
 | `tests/test_roco_calc.py` | 面板/伤害/增减益/星陨的单元测试 |
 | `tests/test_roco_analysis.py` | 范围推断的单元测试 |

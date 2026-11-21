@@ -208,9 +208,19 @@
   - 新增 2 个后端测试；测试从 197 个增加到 199 个
   - `app.js` 通过语法检查；无界面浏览器实测选择对位、天气锁定、状态提示和刷新恢复都正常，没有脚本报错
 
+- [x] **第二十五步：合并 OCR PR，接入网页静态操作帧识别**
+  - 合并 Pull Request #1：静态操作帧 OCR、技能池校对、头像 Top 10、视频复核、Windows 截图工具和 37 个 OCR 测试
+  - 新增 `ocr_service.py`：主计算器通过独立 OCR 虚拟环境子进程调用识别，不把 RapidOCR 装进主 Python
+  - 新增 `GET /api/ocr/status` 和 `POST /api/ocr/frame`
+  - 网页新增“OCR 操作帧”卡片：选择布局、上传截图、识别双方精灵/能量/生命/四技能、显示头像候选和未确认字段
+  - 身份确认后可以把识别到的精灵和可学技能填入我方/对方第 1～6 只；不会自动写伤害或回合
+  - 本机安装 `.venv-ocr314`（Python 3.14、RapidOCR 3.10.0、ONNX Runtime 1.32.0、OpenCV headless、Pillow、PyYAML、MSS）并下载约 15 MB PP-OCRv4 模型
+  - OCR 依赖没装好时，网页显示中文提示，计算器和旧功能不受影响
+  - 测试从 199 个增加到 243 个；OCR 依赖、模型和虚拟环境都只在本机，不提交 Git
+
 ## 进行中
 
-（无）
+- [ ] 实时截屏监控与自动回合草稿（下一步）
 
 ## 待开始
 
@@ -248,7 +258,7 @@
 PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 ```
 
-应看到 `Ran 199 tests` 和 `OK`。
+应看到 `Ran 243 tests` 和 `OK`。
 
 检查 6 对 6 队伍推断：
 

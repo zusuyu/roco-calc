@@ -19,7 +19,7 @@
 - “当前出战”伤害表使用对局记录推断出的对方范围、当前生命、双方增减益、天气和星陨；对局中也可以点击任意我方/对方位置查看其他对位。未建模的印记/状态会在表上方提示。
 - 队伍卡片只配置精灵、性格、天分和技能；生命、能量、增减益由对局记录提供，不再手动填写。
 
-当前有 **236 个自动测试**，全部通过。
+当前有 **243 个自动测试**，全部通过。
 
 ## 最快上手
 
@@ -79,7 +79,7 @@ web/assets/skills/   攻击技能图标
 PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 ```
 
-应看到 `Ran 236 tests` 和 `OK`。
+应看到 `Ran 243 tests` 和 `OK`。
 
 ### Windows独立持续截图工具
 
@@ -87,7 +87,7 @@ PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 
 ### 5. 可选：安装本地 CPU OCR
 
-在仓库根目录执行（Windows 和 Linux 均可使用以下命令）：
+如果本机有 Conda，可以用：
 
 ```bash
 conda env create --prefix ./.conda/ocr --file environment-ocr.yml
@@ -95,9 +95,33 @@ conda activate ./.conda/ocr
 python download_ocr.py
 ```
 
-当前机器已经创建好 `.conda/ocr` 环境，只需激活即可。该环境采用 Python 3.11、RapidOCR 3.10.0、CPU 版 ONNX Runtime 1.32.0，不需要独立显卡。
+没有 Conda 时，用 Python 3.10 或更新版本建独立虚拟环境（本机已用 Python 3.14）：
+
+```bash
+python -m venv .venv-ocr314
+# Windows:
+.venv-ocr314\Scripts\python -m pip install -r requirements-ocr.txt
+.venv-ocr314\Scripts\python download_ocr.py
+# Linux/macOS:
+.venv-ocr314/bin/python -m pip install -r requirements-ocr.txt
+.venv-ocr314/bin/python download_ocr.py
+```
+
+主计算器仍然只使用 Python 标准库；OCR 环境放在 `.venv-ocr314`，不会影响网页计算。该环境采用 RapidOCR 3.10.0、CPU 版 ONNX Runtime 1.32.0，不需要独立显卡。
 
 下载内容是 PP-OCRv4 中文 mobile 文字检测及识别 ONNX 模型，合计约 15 MB，保存在 `models/ocr/`；环境与模型均被 Git 忽略。脚本显式选择 v4 mobile，关闭方向分类及 GPU 后端，并生成 `.cache/ocr.yaml`（CPU 推理线程数为 2）。换电脑或移动仓库后重新运行脚本，更新配置里的绝对路径。依赖安装和首次模型下载需要联网；模型齐全后可以离线识别。
+
+### 网页里的 OCR 操作帧
+
+启动 `python server.py` 后，网页会多一个“OCR 操作帧”卡片。它会自动检查 `.venv-ocr314`、模型、布局和头像：
+
+1. 选择布局（参考图 2094×1179，或 1920×1080 屏幕上的 1600×900 游戏窗口）。
+2. 上传一张游戏操作截图。
+3. 点“识别操作帧”。
+4. 结果会显示双方显示名、确认身份、能量/生命读数、四个技能和头像候选。
+5. 身份确认后，可以选择我方/对方第 1～6 只，点“填入队伍”。OCR 只填精灵和可学技能，不会自动写伤害或回合。
+
+如果状态提示“OCR 环境未安装”，按上面的虚拟环境步骤安装后点“重新检查”。OCR 环境没装好时，主网页和伤害计算仍然正常。
 
 识别整张图片，或识别已经裁成单行的文字图片：
 

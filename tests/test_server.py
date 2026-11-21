@@ -210,6 +210,25 @@ class TestHttp(unittest.TestCase):
         meta = json.loads(body.decode("utf-8"))
         self.assertEqual(len(meta["pets"]), 621)
 
+    def test_ocr_status_endpoint(self):
+        status, body = self.get("/api/ocr/status")
+        self.assertEqual(status, 200)
+        data = json.loads(body.decode("utf-8"))
+        self.assertIn("ready", data)
+        self.assertIn("layouts", data)
+        self.assertIn("message", data)
+
+    def test_ocr_frame_empty_body(self):
+        request = urllib.request.Request(
+            self.base + "/api/ocr/frame?layout=ocr_reference4",
+            data=b"",
+            headers={"Content-Type": "application/octet-stream"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_asset_file_served(self):
         meta = server.build_meta()
         water = next(

@@ -1,3 +1,3 @@
-# 可选的 CPU OCR 环境；核心计算器无需这些依赖。
+# Optional CPU OCR environment; the core calculator does not need these.
 rapidocr==3.10.0
 onnxruntime==1.32.0

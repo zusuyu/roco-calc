@@ -9,6 +9,8 @@
 
 只监听本机，不安装任何第三方包。提供：
     GET  /api/meta      精灵、性格、攻击技能和每只精灵的可学习技能
+    GET  /api/ocr/status OCR 环境、模型、布局和头像状态
+    POST /api/ocr/frame 静态操作帧 OCR（原始图片字节）
     GET  /assets/...    本机图片（精灵头像、技能图标）
     POST /api/analyze   单只精灵：返回对方范围和伤害范围
     POST /api/team      6 对 6：返回每只对方精灵的范围和双方技能表
@@ -23,8 +25,9 @@ import traceback
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import ocr_service as ocr
 import roco_analysis as ra
 import roco_battle as rb
 import roco_calc as rc
@@ -246,6 +249,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"ok": True})
             return
+        if path == "/api/ocr/status":
+            query = parse_qs(urlsplit(self.path).query)
+            force = query.get("force", [""])[0] in ("1", "true", "yes")
+            self._send_json(200, ocr.status(force=force))
+            return
         if path.startswith("/assets/"):
             self._send_asset(path)
             return
@@ -262,8 +270,65 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_bytes(200, file_path.read_bytes(), content_type)
 
+    def _handle_ocr_frame(self):
+        parsed = urlsplit(self.path)
+        query = parse_qs(parsed.query)
+
+        def value(name, default=None):
+            items = query.get(name)
+            return items[0] if items else default
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json(400, {"error": "图片长度不合法。"})
+            return
+        if length <= 0:
+            self._send_json(400, {"error": "没有收到图片。"})
+            return
+        if length > MAX_REQUEST_BYTES:
+            self._send_json(413, {"error": "图片太大，请先裁成游戏内容区域。"})
+            return
+        body = self.rfile.read(length)
+        layout = value("layout")
+        if not layout:
+            layouts = ocr.list_layouts()
+            if not layouts:
+                self._send_json(503, {"error": "没有找到 OCR 布局配置。"})
+                return
+            layout = layouts[0]["id"]
+        try:
+            image_path = ocr.save_upload(body)
+            result = ocr.run_frame(
+                image_path,
+                layout,
+                our_pet=value("our_pet") or None,
+                opponent_pet=value("opponent_pet") or None,
+                our_form=value("our_form") or None,
+                opponent_form=value("opponent_form") or None,
+                debug=value("debug") in ("1", "true", "yes"),
+                no_avatar=value("no_avatar") in ("1", "true", "yes"),
+            )
+        except ocr.OcrUnavailable as exc:
+            self._send_json(503, {"error": str(exc)})
+            return
+        except ocr.OcrError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except Exception:
+            traceback.print_exc()
+            self._send_json(
+                500,
+                {"error": "OCR 服务器内部错误，请查看运行 server.py 的窗口。"},
+            )
+            return
+        self._send_json(200, result)
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/ocr/frame":
+            self._handle_ocr_frame()
+            return
         if path not in ("/api/analyze", "/api/team", "/api/battle"):
             self._send_json(404, {"error": "找不到这个地址。"})
             return
