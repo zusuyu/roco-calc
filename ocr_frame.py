@@ -14,6 +14,7 @@ import time
 from download_ocr import load_image, prepare_config
 from ocr_skills import load_skill_pool, recognize
 import roco_calc as rc
+from type_icons import detect_types
 
 
 def resolve_frame_region(layout, image_size):
@@ -242,6 +243,9 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
         if side == "our":
             our_identity = identity
         output[side] = pet_result(label, energy, identity, source)
+        if avatar_matcher is not None and "avatar" in layout[side]:
+            # 属性图标只用于展示和核对，暂不参与身份判断。
+            output[side]["types"] = detect_types(image, layout[side]["avatar"])
         if avatar is not None:
             output[side]["avatar_match"] = avatar
         diagnostics["pets"][side] = {

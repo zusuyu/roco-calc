@@ -3889,6 +3889,25 @@ function renderOcrSide(side, info) {
         : "确认身份：未确认；显示名不能直接当成精灵原名"
     )
   );
+  const detectedTypes = info.types;
+  if (detectedTypes) {
+    if (detectedTypes.status === "unavailable") {
+      card.append(
+        element(
+          "div",
+          "ocr-meta",
+          "属性：本机还没有属性图标，运行 python download_assets.py --only types 后可用"
+        )
+      );
+    } else if (detectedTypes.primary) {
+      const names = [detectedTypes.primary, detectedTypes.secondary].filter(Boolean);
+      card.append(
+        element("div", "ocr-meta", `属性：${names.join(" / ")}（头像左下角图标）`)
+      );
+    } else {
+      card.append(element("div", "ocr-meta", "属性：未识别"));
+    }
+  }
   const readouts = [];
   if (info.hp !== undefined && info.hp !== null) {
     readouts.push(`生命 ${info.hp}/${info.max_hp}`);

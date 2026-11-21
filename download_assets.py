@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-下载精灵头像和攻击技能图标。
+下载精灵头像、攻击技能图标和属性图标。
 
 图片来自洛克王国 wiki（BWiki），网站有流量管控，所以这里：
     - 先批量查询图片地址（每批 50 个）；
@@ -14,11 +14,13 @@
     python download_assets.py --dry-run       只统计，不联网
     python download_assets.py --sample 5      试下 5 张精灵头像 + 5 张技能图标
     python download_assets.py                 下载全部
+    python download_assets.py --only types    只下载 18 个属性图标
     python download_assets.py --metadata-only 只查图片地址，不下载图片
 
 图片保存到:
     web/assets/pets/       精灵头像
     web/assets/skills/     技能图标
+    web/assets/types/      属性图标
 图片名单保存到:
     data/assets.json
 """
@@ -36,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import crawl_pets
+from type_icons import TYPE_FILES
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -47,6 +50,7 @@ WEB_DIR = ROOT / "web"
 ASSET_DIR = WEB_DIR / "assets"
 PET_DIR = ASSET_DIR / "pets"
 SKILL_DIR = ASSET_DIR / "skills"
+TYPE_DIR = ASSET_DIR / "types"
 META_CACHE = CACHE_DIR / "assets_meta.json"
 MANIFEST = DATA_DIR / "assets.json"
 
@@ -115,11 +119,20 @@ def build_pet_entries():
             image = (chosen.get("image") or {}) if chosen else {}
             filename = image.get("head")
             shiny_filename = image.get("shiny_head")
+            catalog_types = (chosen.get("types") or []) if chosen else []
+            if isinstance(catalog_types, str):
+                catalog_types = catalog_types.split("|")
+            types = [value for value in catalog_types
+                     if isinstance(value, str) and value]
+            if not types:
+                types = [value for value in (pet.get("types") or "").split("|")
+                         if value]
             entries.append(
                 {
                     "number": number,
                     "name": name,
                     "form": form,
+                    "types": types,
                     "avatar_file": filename,
                     "avatar": f"/assets/pets/{filename}" if filename else None,
                     "shiny_avatar_file": shiny_filename,
@@ -178,6 +191,11 @@ def build_plan():
                 filename,
                 {"kind": "skills", "filename": filename, "target": SKILL_DIR / filename},
             )
+    for _, filename in TYPE_FILES.values():
+        jobs.setdefault(
+            filename,
+            {"kind": "types", "filename": filename, "target": TYPE_DIR / filename},
+        )
     return pets, skills, jobs
 
 
@@ -365,6 +383,7 @@ def write_manifest(pets, skills):
                 "number": pet["number"],
                 "name": pet["name"],
                 "form": pet["form"],
+                "types": pet.get("types") or [],
                 "avatar": pet["avatar"],
                 "shiny_avatar": pet.get("shiny_avatar"),
             }
@@ -387,15 +406,18 @@ def select_jobs(jobs, args):
     """根据 --sample / --limit / --only 选择这次要下载的图片。"""
     pet_jobs = [job for job in jobs.values() if job["kind"] == "pets"]
     skill_jobs = [job for job in jobs.values() if job["kind"] == "skills"]
+    type_jobs = [job for job in jobs.values() if job["kind"] == "types"]
 
     if args.only == "pets":
         selected = pet_jobs
     elif args.only == "skills":
         selected = skill_jobs
+    elif args.only == "types":
+        selected = type_jobs
     elif args.sample:
         selected = pet_jobs[: args.sample] + skill_jobs[: args.sample]
     else:
-        selected = pet_jobs + skill_jobs
+        selected = pet_jobs + skill_jobs + type_jobs
 
     if args.limit:
         selected = selected[: args.limit]
@@ -421,8 +443,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--only",
-        choices=("pets", "skills"),
-        help="只处理精灵头像或只处理技能图标",
+        choices=("pets", "skills", "types"),
+        help="只处理精灵头像、技能图标或属性图标",
     )
     parser.add_argument(
         "--metadata-only",
@@ -450,9 +472,11 @@ def main(argv=None):
     pets, skills, jobs = build_plan()
     pet_files = {job["filename"] for job in jobs.values() if job["kind"] == "pets"}
     skill_files = {job["filename"] for job in jobs.values() if job["kind"] == "skills"}
+    type_files = {job["filename"] for job in jobs.values() if job["kind"] == "types"}
     print(
         f"精灵 {len(pets)} 条，对应头像 {len(pet_files)} 张；"
         f"技能 {len(skills)} 条，对应图标 {len(skill_files)} 张；"
+        f"属性图标 {len(type_files)} 张；"
         f"去重后共 {len(jobs)} 张图片。"
     )
 

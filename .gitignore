@@ -11,6 +11,7 @@ __pycache__/
 # 从 wiki 下载的游戏图片（只放本机，不上传 GitHub）
 web/assets/pets/
 web/assets/skills/
+web/assets/types/
 
 # 本地 OCR 环境和模型
 .conda/

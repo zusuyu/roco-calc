@@ -19,7 +19,7 @@
 - “当前出战”伤害表使用对局记录推断出的对方范围、当前生命、双方增减益、天气和星陨；对局中也可以点击任意我方/对方位置查看其他对位。未建模的印记/状态会在表上方提示。
 - 队伍卡片只配置精灵、性格、天分和技能；生命、能量、增减益由对局记录提供，不再手动填写。
 
-当前有 **248 个自动测试**，全部通过。
+当前有 **256 个自动测试**，全部通过。
 
 ## 最快上手
 
@@ -64,14 +64,21 @@ python download_assets.py
 
 `--dry-run` 只统计，不联网；正式下载会一张一张地进行，默认间隔 0.6 秒，已存在的图片会跳过。下载完成后刷新网页即可看到图片。
 
+只缺属性图标时，可以单独下载：
+
+```bash
+python download_assets.py --only types
+```
+
 图片保存在：
 
 ```text
 web/assets/pets/     精灵头像
 web/assets/skills/   攻击技能图标
+web/assets/types/    18 个属性图标（识别头像左下角用）
 ```
 
-这两个目录已被 `.gitignore` 忽略，不会上传到 GitHub。图片来自游戏/wiki，只保存在本机。
+这些目录已被 `.gitignore` 忽略，不会上传到 GitHub。图片来自游戏/wiki，只保存在本机。
 
 ### 4. 跑测试
 
@@ -79,7 +86,7 @@ web/assets/skills/   攻击技能图标
 PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 ```
 
-应看到 `Ran 248 tests` 和 `OK`。
+应看到 `Ran 256 tests` 和 `OK`。
 
 ### Windows独立持续截图工具
 
@@ -356,7 +363,8 @@ python crawl_learnsets.py
 | `crawl_skills.py` | 抓技能表 |
 | `crawl_natures.py` | 抓性格表 |
 | `crawl_learnsets.py` | 抓每只精灵的可学习技能 |
-| `download_assets.py` | 限速下载精灵头像和技能图标，生成图片名单 |
+| `download_assets.py` | 限速下载精灵头像、技能图标和属性图标，生成图片名单 |
+| `type_icons.py` | 识别战斗画面头像左下角的主/副属性图标 |
 | `data/*.csv` | 已生成并提交的游戏数据 |
 | `data/assets.json` | 精灵/技能到本地图片的对应关系 |
 | `roco_calc.py` | 核心库：面板值、属性倍率、伤害公式 |
@@ -442,7 +450,7 @@ web/assets/ + data/assets.json
 - 提交信息使用“前缀 + 中文描述”，前缀用 `feat`、`fix`、`docs`、`chore`，例如：
   `feat: 增加速度与先手判断`
 - 新增数据或重新抓取数据时，请说明来源和生成命令。
-- 不要把 `web/assets/pets/` 和 `web/assets/skills/` 里的图片提交到 Git。
+- 不要把 `web/assets/pets/`、`web/assets/skills/` 和 `web/assets/types/` 里的图片提交到 Git。
 - 大改动建议先开 issue 或分支讨论，避免直接改坏 `master`。
 
 ## 数据来源与参考
