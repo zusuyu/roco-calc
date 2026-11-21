@@ -1,12 +1,14 @@
 """名字只能辅助头像候选，不能用冒名昵称替代视觉身份。"""
 
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from avatar_match import assess_candidates
+from avatar_match import _load_groups, assess_candidates
 
 
 def candidate(name, score, inliers=0, shared=None):
@@ -46,6 +48,28 @@ class TestAvatarNameEvidence(unittest.TestCase):
         self.assertIsNone(result["identity"])
         self.assertEqual(result["status"], "shared_avatar")
         self.assertEqual(len(result["candidates"][0]["pets"]), 2)
+
+    def test_shiny_avatar_group_keeps_same_pet_identity(self):
+        manifest = {
+            "pets": [
+                {
+                    "number": "010",
+                    "name": "水灵",
+                    "form": "",
+                    "avatar": "/assets/pets/PetAvatar_3005.png",
+                    "shiny_avatar": "/assets/pets/PetAvatar_3437_1.png",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            groups = _load_groups(path)
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(any(group["shiny"] for group in groups))
+        self.assertTrue(
+            all(group["pets"][0]["name"] == "水灵" for group in groups)
+        )
 
     def test_small_score_margin_and_no_candidates_are_not_confirmed(self):
         rows = [candidate("花衣蝶", 0.97, 12), candidate("武者鸡", 0.96, 12)]

@@ -112,7 +112,9 @@ def build_pet_entries():
             if chosen is None and candidates:
                 # 少数精灵在 pets.csv 里没有写形态；使用资料表中排在最前面的基础形态。
                 chosen = candidates[0]
-            filename = (chosen.get("image") or {}).get("head") if chosen else None
+            image = (chosen.get("image") or {}) if chosen else {}
+            filename = image.get("head")
+            shiny_filename = image.get("shiny_head")
             entries.append(
                 {
                     "number": number,
@@ -120,6 +122,10 @@ def build_pet_entries():
                     "form": form,
                     "avatar_file": filename,
                     "avatar": f"/assets/pets/{filename}" if filename else None,
+                    "shiny_avatar_file": shiny_filename,
+                    "shiny_avatar": (
+                        f"/assets/pets/{shiny_filename}" if shiny_filename else None
+                    ),
                 }
             )
     return entries
@@ -155,12 +161,16 @@ def build_plan():
     skills = build_skill_entries()
     jobs = {}
     for pet in pets:
-        filename = pet["avatar_file"]
-        if filename:
-            jobs.setdefault(
-                filename,
-                {"kind": "pets", "filename": filename, "target": PET_DIR / filename},
-            )
+        for filename in (pet["avatar_file"], pet.get("shiny_avatar_file")):
+            if filename:
+                jobs.setdefault(
+                    filename,
+                    {
+                        "kind": "pets",
+                        "filename": filename,
+                        "target": PET_DIR / filename,
+                    },
+                )
     for skill in skills:
         filename = skill["icon_file"]
         if filename:
@@ -356,6 +366,7 @@ def write_manifest(pets, skills):
                 "name": pet["name"],
                 "form": pet["form"],
                 "avatar": pet["avatar"],
+                "shiny_avatar": pet.get("shiny_avatar"),
             }
             for pet in pets
         ],

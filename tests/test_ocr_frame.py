@@ -9,10 +9,51 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ocr_frame import (parse_hp, pet_result, resolve_frame_region, select_number,
-                       skill_result, validate_layout)
+                       skill_identity_candidates, skill_result, validate_layout)
 
 
 class TestStructuredFrame(unittest.TestCase):
+    def test_relaxed_energy_accepts_single_high_confidence_ten(self):
+        reading = [{"text": "10", "confidence": 0.8158}]
+        self.assertIsNone(select_number(reading))
+        self.assertEqual(select_number(reading, min_single=0.75), 10)
+
+    def test_database_energy_supports_low_confidence_digit(self):
+        reading = {
+            "text": "Z",
+            "confidence": 0.62,
+            "retries": [{"text": "2", "confidence": 0.55}],
+        }
+        result = skill_result(
+            1,
+            [{"name": "花炮", "category": "状态", "status": "exact"}],
+            None,
+            None,
+            reading,
+        )
+        self.assertEqual(result["energy_cost"], 2)
+        self.assertEqual(result["energy_cost_status"], "database_supported")
+        self.assertEqual(result["energy_cost_estimate"], 2)
+
+    def test_database_energy_estimate_is_not_claimed_as_read(self):
+        result = skill_result(
+            1,
+            [{"name": "花炮", "category": "状态", "status": "exact"}],
+            None,
+            None,
+            {"text": "Z", "confidence": 0.62, "retries": []},
+        )
+        self.assertIsNone(result["energy_cost"])
+        self.assertEqual(result["energy_cost_status"], "database_estimate")
+        self.assertEqual(result["energy_cost_estimate"], 2)
+
+    def test_skill_set_candidates_identify_fire_bug_family(self):
+        candidates = skill_identity_candidates(
+            ("引燃", "藤绞", "充分燃烧", "火焰护盾")
+        )
+        names = {item["name"] for item in candidates}
+        self.assertEqual(names, {"柴渣虫", "燃薪虫"})
+
     def test_zero_energy_is_valid_and_ambiguous_numbers_are_rejected(self):
         self.assertEqual(select_number([
             {"text": "D", "confidence": 0.99},

@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 
 ROOT = Path(__file__).resolve().parent
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 SCALES = (0.85, 1.0, 1.15)
 
 
@@ -193,17 +193,27 @@ def _load_groups(manifest_path):
     groups = {}
     assets = (ROOT / "web" / "assets" / "pets").resolve()
     for pet in manifest["pets"]:
-        if not pet.get("avatar"):
-            continue
-        path = (ROOT / "web" / pet["avatar"].lstrip("/")).resolve()
-        if not path.is_relative_to(assets):
-            raise ValueError("头像名单包含图片目录以外的路径。")
-        group = groups.setdefault(pet["avatar"], {
-            "avatar": pet["avatar"], "path": path, "pets": [],
-        })
-        key = (pet["number"], pet["name"], pet["form"])
-        group["pets"].append({"pet_id": pet_ids.get(key), "number": pet["number"],
-                              "name": pet["name"], "form": pet["form"]})
+        for avatar_index, avatar in enumerate(
+            (pet.get("avatar"), pet.get("shiny_avatar"))
+        ):
+            if not avatar:
+                continue
+            path = (ROOT / "web" / avatar.lstrip("/")).resolve()
+            if not path.is_relative_to(assets):
+                raise ValueError("头像名单包含图片目录以外的路径。")
+            group = groups.setdefault(avatar, {
+                "avatar": avatar, "path": path, "pets": [], "shiny": False,
+            })
+            group["shiny"] = group["shiny"] or avatar_index == 1
+            key = (pet["number"], pet["name"], pet["form"])
+            if not any(
+                (item["number"], item["name"], item["form"]) == key
+                for item in group["pets"]
+            ):
+                group["pets"].append({
+                    "pet_id": pet_ids.get(key), "number": pet["number"],
+                    "name": pet["name"], "form": pet["form"],
+                })
     return list(groups.values())
 
 

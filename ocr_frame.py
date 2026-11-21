@@ -5,12 +5,14 @@ python ocr_frame.py 参考4.jpg --layout configs/ocr_reference4.json
 """
 
 import argparse
+import csv
 import json
+from functools import lru_cache
 from pathlib import Path
 import re
 import time
 
-from download_ocr import load_image, prepare_config
+from download_ocr import ROOT, load_image, prepare_config
 from ocr_skills import load_skill_pool, recognize
 import roco_calc as rc
 
@@ -57,7 +59,7 @@ def validate_layout(layout, image_size):
             raise ValueError(f"布局包含无效裁剪坐标：{box}")
 
 
-def read_field(image, region, engine, numeric=False):
+def read_field(image, region, engine, numeric=False, relaxed=False):
     """只在配置的字段内读取；数字必须完整匹配，不从杂乱字符串提取。"""
     from PIL import Image
 
@@ -71,14 +73,16 @@ def read_field(image, region, engine, numeric=False):
     if numeric:
         value = int(value) if value and re.fullmatch(r"[0-9]{1,5}", value) else None
         if value is None or confidence < 0.85:
-            value, retries = retry_number(image.crop(region), engine, reading)
+            value, retries = retry_number(
+                image.crop(region), engine, reading, relaxed=relaxed
+            )
             reading["retries"] = retries
     reading["status"] = "recognized" if value is not None else "unresolved"
     reading["value"] = value
     return value, reading
 
 
-def select_number(readings):
+def select_number(readings, min_single=0.9):
     groups = {}
     for reading in readings:
         text, score = reading["text"], reading["confidence"]
@@ -89,26 +93,31 @@ def select_number(readings):
         return None
     best = ranked[0]
     score = max(groups[best])
-    if score < 0.6 or (len(groups[best]) < 2 and score < 0.9):
+    if score < 0.6 or (len(groups[best]) < 2 and score < min_single):
         return None
     if len(ranked) > 1 and score - max(groups[ranked[1]]) < 0.15:
         return None
     return best
 
 
-def retry_number(crop, engine, initial_reading=None):
-    """低置信度数字做有限次旋转、反色重读，不把 D/O 自动当作 0。"""
+def retry_number(crop, engine, initial_reading=None, relaxed=False):
+    """低置信度数字做有限次旋转、反色重读，不把 D/O 自动当作 0。
+
+    relaxed 只用于“当前能量”这种值域很小、单个 10 也很可能正确的字段；
+    技能能耗仍使用默认严格阈值，再由技能数据库做低置信度校核。
+    """
     import cv2
     import numpy as np
 
     pixels = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2BGR)
     pixels = cv2.resize(pixels, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    min_single = 0.75 if relaxed else 0.9
     readings = [dict(initial_reading)] if initial_reading else []
     # 数字徽标也可能倾斜；检测框会先做透视校正，避免直接读整块徽标。
     detected = engine(pixels, use_det=True, use_cls=False, text_score=0.3)
     for text, score in zip(detected.txts or (), detected.scores or ()):
         readings.append({"text": text.strip(), "confidence": float(score)})
-    selected = select_number(readings)
+    selected = select_number(readings, min_single=min_single)
     if selected is not None:
         return selected, readings
     height, width = pixels.shape[:2]
@@ -128,7 +137,7 @@ def retry_number(crop, engine, initial_reading=None):
             if result.txts:
                 readings.append({"text": result.txts[0],
                                  "confidence": float(result.scores[0])})
-    return select_number(readings), readings
+    return select_number(readings, min_single=min_single), readings
 
 
 def pet_result(display_name, energy, identity=None, identity_source="provided"):
@@ -153,19 +162,94 @@ def parse_hp(text):
     return None, None
 
 
-def skill_result(slot, readings, displayed_power, energy_cost):
-    """每个固定位置单独组装，缺失识别不能让后面的技能前移。"""
+@lru_cache(maxsize=None)
+def _skill_energy(name):
+    if not name:
+        return None
+    try:
+        return rc.find_skill(name).get("energy")
+    except rc.RocoCalcError:
+        return None
+
+
+def skill_result(slot, readings, displayed_power, energy_cost,
+                 energy_cost_reading=None):
+    """每个固定位置单独组装，缺失识别不能让后面的技能前移。
+
+    能耗先采用画面读数；读不出时用技能数据库能耗做低置信度校核。若 OCR
+    重读中确实出现过数据库数字，标记 database_supported；否则只给
+    database_estimate，不冒充画面直接读数。
+    """
     row = readings[0] if len(readings) == 1 else {}
     category = row.get("category")
+    name = row.get("name")
+    db_energy = _skill_energy(name)
+    energy_status = "unresolved"
+    if energy_cost is not None:
+        energy_status = "recognized"
+    elif db_energy is not None:
+        candidates = []
+        if energy_cost_reading:
+            candidates.append(energy_cost_reading)
+            candidates.extend(energy_cost_reading.get("retries") or [])
+        matched = any(
+            str(item.get("text", "")).strip() == str(db_energy)
+            and float(item.get("confidence") or 0) >= 0.4
+            for item in candidates
+        )
+        if matched:
+            energy_cost = db_energy
+            energy_status = "database_supported"
+        else:
+            energy_status = "database_estimate"
     power = displayed_power if category == "攻击" else None
     return {
-        "slot": slot, "name": row.get("name"), "category": category,
+        "slot": slot, "name": name, "category": category,
         "power": power, "base_power": row.get("base_power"),
         "energy_cost": energy_cost,
+        "energy_cost_status": energy_status,
+        "energy_cost_estimate": db_energy,
         "name_status": row.get("status", "unresolved"),
         "power_status": ("not_applicable" if category in ("防御", "状态")
                          else "recognized" if power is not None else "unresolved"),
     }
+
+
+@lru_cache(maxsize=1)
+def _learnset_index():
+    by_skill = {}
+    meta = {}
+    path = ROOT / "data" / "learnsets.csv"
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("category") not in ("攻击", "防御", "状态"):
+                continue
+            key = (row["number"], row["name"], row.get("form") or "")
+            meta[key] = row.get("pet_id")
+            by_skill.setdefault(row["skill_name"], set()).add(key)
+    return by_skill, meta
+
+
+@lru_cache(maxsize=64)
+def skill_identity_candidates(skill_names):
+    """用已确认的四个技能反查可能精灵；只是候选，不自动替换头像身份。"""
+    names = tuple(sorted({name for name in skill_names if name}))
+    if len(names) < 2:
+        return []
+    by_skill, meta = _learnset_index()
+    sets = [by_skill.get(name) for name in names]
+    if any(item is None for item in sets):
+        return []
+    keys = set.intersection(*sets)
+    return [
+        {
+            "number": key[0],
+            "name": key[1],
+            "form": key[2],
+            "pet_id": meta.get(key),
+        }
+        for key in sorted(keys)
+    ]
 
 
 def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=None,
@@ -178,7 +262,9 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
     diagnostics = {"pets": {}, "skills": []}
     for side, identity in (("our", our_identity), ("opponent", opponent_identity)):
         label, label_reading = read_field(image, layout[side]["display_name"], engine)
-        energy, energy_reading = read_field(image, layout[side]["energy"], engine, True)
+        energy, energy_reading = read_field(
+            image, layout[side]["energy"], engine, True, relaxed=True
+        )
         avatar = None
         source = "provided"
         if avatar_matcher is not None and "avatar" in layout[side]:
@@ -227,12 +313,18 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
         else:
             power, power_reading = read_field(image, region["power"], engine, True)
         cost, cost_reading = read_field(image, region["energy_cost"], engine, True)
-        output["skills"].append(skill_result(region["slot"],
-                                rows, power, cost))
+        output["skills"].append(skill_result(
+            region["slot"], rows, power, cost, cost_reading
+        ))
         diagnostics["skills"].append({
             "slot": region["slot"], **detected,
             "power": power_reading, "energy_cost": cost_reading,
         })
+    skill_candidates = skill_identity_candidates(
+        [skill.get("name") for skill in output["skills"] if skill.get("name")]
+    )
+    if skill_candidates:
+        output["skill_identity_candidates"] = skill_candidates
     if debug:
         diagnostics.update(source_size=list(source_size), viewport=viewport,
                            frame_size=list(image.size))
