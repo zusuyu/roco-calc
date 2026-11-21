@@ -55,6 +55,22 @@ def pick_window(windows, keyword=GAME_TITLE_KEYWORD):
     return max(candidates, key=score)[0]
 
 
+def wait_for_window(api, title, wait_seconds, exclude_pid=None, poll=2.0):
+    """找不到游戏窗口时等待一会儿，方便先开监控再启动游戏。"""
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    announced = False
+    while True:
+        window = pick_window(api.windows(exclude_pid=exclude_pid), title)
+        if window is not None:
+            return window
+        if time.monotonic() >= deadline:
+            return None
+        if not announced:
+            print(f"没有找到标题包含“{title}”的游戏窗口，等待游戏打开……")
+            announced = True
+        time.sleep(poll)
+
+
 def label_of(side):
     if not side:
         return "未识别"
@@ -221,10 +237,10 @@ def run(args):
     layout = json.loads(Path(args.layout).read_text(encoding="utf-8"))
     validate_layout(layout, tuple(layout["image_size"]))
     api = WindowsAPI()
-    window = pick_window(api.windows(exclude_pid=os.getpid()), args.title)
+    window = wait_for_window(api, args.title, args.wait, exclude_pid=os.getpid())
     if window is None:
         titles = "；".join(w["title"] for w in api.windows())
-        print(f"没有找到标题包含“{args.title}”的游戏窗口。当前窗口：{titles}")
+        print(f"等待超时：没有找到标题包含“{args.title}”的游戏窗口。当前窗口：{titles}")
         return 2
     hwnd = window["hwnd"]
     area = api.area(hwnd)
@@ -333,6 +349,8 @@ def main(argv=None):
                         help="日志保存目录")
     parser.add_argument("--duration", type=float, default=0,
                         help="监控多少秒后自动停止；0 表示一直运行")
+    parser.add_argument("--wait", type=float, default=0,
+                        help="找不到游戏窗口时最多等待多少秒；0 表示立即退出")
     parser.add_argument("--self-test", action="store_true",
                         help="只截一帧并识别，打印结果后退出")
     parser.add_argument("--save-frames", action="store_true",

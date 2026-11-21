@@ -1,5 +1,7 @@
 """实时监控的窗口选择、状态整理和变化对比（不依赖游戏或 OCR 环境）。"""
 
+import contextlib
+import io
 from pathlib import Path
 import sys
 import unittest
@@ -7,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from live_monitor import (diff_states, format_state, is_battle_like,
-                          pick_window, state_summary)
+                          pick_window, state_summary, wait_for_window)
 
 
 class Box:
@@ -49,6 +51,30 @@ class TestWindowSelection(unittest.TestCase):
 
     def test_returns_none_without_a_game_window(self):
         self.assertIsNone(pick_window([window("记事本", 800, 600)]))
+
+    def test_waits_until_the_game_window_appears(self):
+        class Api:
+            def __init__(self):
+                self.polls = 0
+
+            def windows(self, exclude_pid=None):
+                self.polls += 1
+                if self.polls < 2:
+                    return []
+                return [window("洛克王国：世界  ", 1600, 900)]
+
+        api = Api()
+        with contextlib.redirect_stdout(io.StringIO()):
+            picked = wait_for_window(api, "洛克", 1.0, poll=0.01)
+        self.assertEqual(picked["title"].strip(), "洛克王国：世界")
+
+    def test_wait_times_out_without_a_game_window(self):
+        class Api:
+            def windows(self, exclude_pid=None):
+                return []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(wait_for_window(Api(), "洛克", 0.05, poll=0.01))
 
 
 class TestStateSummary(unittest.TestCase):
