@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from live_monitor import (apply_identity, apply_skill, apply_status,
                           build_regions, diff_states, empty_state,
                           format_state, is_battle_like, pick_window,
-                          signature_delta, state_summary, wait_for_window)
+                          push_state, signature_delta, state_summary,
+                          wait_for_window)
 
 
 class Box:
@@ -177,6 +178,17 @@ LAYOUT = {
                 "cooldown": [230 + slot, 300, 270 + slot, 320]}
                for slot in (1, 2, 3, 4)],
 }
+
+
+class TestPush(unittest.TestCase):
+    def test_push_without_token_file_reports_missing_token(self):
+        ok, error = push_state(
+            "http://127.0.0.1:9",
+            Path("definitely-missing-live-token"),
+            {"active": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("令牌", error)
 
 
 class TestRegionsAndMerging(unittest.TestCase):

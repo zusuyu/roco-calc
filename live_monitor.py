@@ -28,8 +28,8 @@ import time
 ROOT = Path(__file__).resolve().parent
 DEFAULT_LAYOUT = ROOT / "configs" / "ocr_1602x932_window.json"
 DEFAULT_OUTPUT = ROOT / ".cache" / "live"
-LATEST_PATH = DEFAULT_OUTPUT / "latest.json"
-HEARTBEAT_PATH = DEFAULT_OUTPUT / "heartbeat.json"
+DEFAULT_SERVER = "http://127.0.0.1:8000"
+DEFAULT_TOKEN_FILE = DEFAULT_OUTPUT / "token"
 GAME_TITLE_KEYWORD = "洛克"
 BROWSER_TITLE_PARTS = ("Microsoft Edge", "Google Chrome", "浏览器", "Firefox")
 CONTENT_SIZES = {(1600, 900), (1602, 932), (2094, 1179)}
@@ -385,7 +385,6 @@ def capture_loop(api, hwnd, layout, regions, state, fps, refresh_s, stop_event,
     previous = {}
     next_tick = time.perf_counter()
     next_refresh = time.perf_counter() + refresh_s if refresh_s > 0 else None
-    last_beat = 0.0
     while not stop_event.is_set() and state.running:
         now = time.perf_counter()
         if not api.user.IsWindow(hwnd):
@@ -429,13 +428,6 @@ def capture_loop(api, hwnd, layout, regions, state, fps, refresh_s, stop_event,
                 state.stats["diff_ms"] += (finished - captured) * 1000
                 if changes:
                     state.condition.notify_all()
-            if now - last_beat >= 1.0:
-                write_json_atomic(HEARTBEAT_PATH, {
-                    "active": True,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "snapshots": state.stats["snapshots"],
-                })
-                last_beat = now
         except Exception as exc:
             with state.lock:
                 state.stats["capture_errors"] += 1
@@ -453,34 +445,27 @@ def capture_loop(api, hwnd, layout, regions, state, fps, refresh_s, stop_event,
 
 # ---------- 解析循环 ----------
 
-def write_json_atomic(path, payload, attempts=20):
-    """网页可能在同时读文件；Windows 上替换失败时重试，最后退回直接写。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(payload, ensure_ascii=False) + "\n"
-    temporary = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
-    temporary.write_text(body, encoding="utf-8")
-    for _ in range(attempts):
-        try:
-            temporary.replace(path)
-            return True
-        except PermissionError:
-            time.sleep(0.01)
-        except OSError:
-            break
+def push_state(server_url, token_file, payload, timeout=1.0):
+    """把状态推给本地网页服务；不经过共享文件，避免读写并发。"""
+    import urllib.error
+    import urllib.request
+
     try:
-        path.write_text(body, encoding="utf-8")
-        return True
+        token = Path(token_file).read_text(encoding="utf-8").strip()
     except OSError:
-        return False
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def write_latest(payload):
-    write_json_atomic(LATEST_PATH, payload)
+        return False, "没有找到实时面板令牌"
+    request = urllib.request.Request(
+        server_url.rstrip("/") + "/api/live/update",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8",
+                 "X-Roco-Live-Token": token},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300, None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, str(exc)
 
 
 def parse_loop(state, layout, engine, matcher, session, args, started):
@@ -493,13 +478,45 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
     last_print = 0.0
     last_log = 0.0
     last_wait = 0.0
+    last_publish = 0.0
+    last_push_warning = 0.0
+    last_batch_ms = 0.0
     log_path = session / "state.jsonl"
     frames_dir = session / "frames"
     event_counter = 0
 
-    while True:
+    def snapshot():
+        with state.lock:
+            stats = dict(state.stats)
+        return {
+            "active": True,
+            "session": str(session),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_s": round(time.perf_counter() - started, 3),
+            "battle": is_battle_like(summary),
+            "state": summary,
+            "events": list(event_history),
+            "timings": {
+                "last_parse_ms": round(last_batch_ms, 1),
+                "groups": timings["groups"],
+                "parse_ms": round(timings["parse_ms"], 1),
+                "parses": timings["parses"],
+                "events": timings["events"],
+            },
+            "stats": stats,
+        }
+
+    def publish():
+        nonlocal last_publish, last_push_warning
+        ok, error = push_state(args.server, args.token_file, snapshot())
+        if not ok and time.perf_counter() - last_push_warning > 10:
+            print(f"实时面板没收到状态：{error}（状态仍写入会话日志）")
+            last_push_warning = time.perf_counter()
+        last_publish = time.perf_counter()
+
+    while state.running:
         with state.condition:
-            while state.running and not state.dirty:
+            if not state.dirty:
                 state.condition.wait(0.2)
             if not state.running:
                 break
@@ -509,103 +526,86 @@ def parse_loop(state, layout, engine, matcher, session, args, started):
                                    1 if group.startswith("status") else 2, group),
             )
             state.dirty.clear()
-            frame = state.frame
-        if frame is None:
-            continue
-        batch_start = time.perf_counter()
-        pool = None
-        for group in groups:
-            group_start = time.perf_counter()
-            try:
-                if group.startswith("identity_"):
-                    side = group.split("_", 1)[1]
-                    before_name = summary["our"].get("name") if side == "our" else None
-                    ident = parse_identity(frame, side, layout, engine, matcher)
-                    apply_identity(summary, side, ident)
-                    if side == "our" and summary["our"].get("name") != before_name:
-                        # 我方换精灵后旧技能不能继续挂着；等新面板出现再填。
-                        for item in summary["skills"]:
-                            item.update(name=None, category=None, power=None,
-                                        energy=None, energy_status=None,
-                                        cooldown=None)
-                elif group.startswith("status_"):
-                    side = group.split("_", 1)[1]
-                    status = parse_status(frame, side, layout, engine)
-                    apply_status(summary, side, status, layout)
-                elif group.startswith("skill_"):
-                    slot = int(group.split("_", 1)[1])
-                    if pool is None:
-                        from ocr_frame import load_pool_for
-                        our = summary["our"]
-                        pool = (load_pool_for({"name": our.get("name"),
-                                               "form": our.get("form")})
-                                if our.get("name") else load_pool_for(None))
-                    region = next(item for item in layout["skills"]
-                                  if item["slot"] == slot)
-                    result, _ = parse_skill(frame, region, engine, pool)
-                    apply_skill(summary, slot, result)
-                timings["groups"] += 1
-            except Exception as exc:
-                print(f"解析 {group} 失败：{exc}")
-            timings["parse_ms"] += (time.perf_counter() - group_start) * 1000
-        timings["parses"] += 1
-        batch_ms = (time.perf_counter() - batch_start) * 1000
-
+            frame = state.frame if groups else None
         elapsed = time.perf_counter() - started
-        battle = is_battle_like(summary)
-        events = diff_states(previous_state, summary) if battle else []
-        if battle:
-            previous_state = copy.deepcopy(summary)
-            timings["events"] += len(events)
-            for event in events:
-                event_history.append({
-                    "elapsed_s": round(elapsed, 1),
-                    "text": event,
-                })
-            if events or elapsed - last_print >= 3:
-                print(f"[{elapsed:6.1f}s] {format_state(summary)}")
-                for event in events:
-                    print(f"           · {event}")
-                last_print = elapsed
-            if events or elapsed - last_log >= 5:
-                record = {
-                    "elapsed_s": round(elapsed, 3),
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "groups": groups,
-                    "events": events,
-                    "state": summary,
-                }
-                with log_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                last_log = elapsed
-                if events and args.save_events:
-                    frames_dir.mkdir(parents=True, exist_ok=True)
-                    event_counter += 1
-                    frame.save(frames_dir / f"event_{event_counter:04d}_{elapsed:07.1f}s.png")
-        elif elapsed - last_wait >= 10:
-            print("等待战斗界面；当前画面没有完整的战斗 HUD。")
-            last_wait = elapsed
-            previous_state = None
+        if groups and frame is not None:
+            batch_start = time.perf_counter()
+            pool = None
+            for group in groups:
+                group_start = time.perf_counter()
+                try:
+                    if group.startswith("identity_"):
+                        side = group.split("_", 1)[1]
+                        before_name = (summary["our"].get("name")
+                                       if side == "our" else None)
+                        ident = parse_identity(frame, side, layout, engine, matcher)
+                        apply_identity(summary, side, ident)
+                        if side == "our" and summary["our"].get("name") != before_name:
+                            # 我方换精灵后旧技能不能继续挂着；等新面板出现再填。
+                            for item in summary["skills"]:
+                                item.update(name=None, category=None, power=None,
+                                            energy=None, energy_status=None,
+                                            cooldown=None)
+                    elif group.startswith("status_"):
+                        side = group.split("_", 1)[1]
+                        status = parse_status(frame, side, layout, engine)
+                        apply_status(summary, side, status, layout)
+                    elif group.startswith("skill_"):
+                        slot = int(group.split("_", 1)[1])
+                        if pool is None:
+                            from ocr_frame import load_pool_for
+                            our = summary["our"]
+                            pool = (load_pool_for({"name": our.get("name"),
+                                                   "form": our.get("form")})
+                                    if our.get("name") else load_pool_for(None))
+                        region = next(item for item in layout["skills"]
+                                      if item["slot"] == slot)
+                        result, _ = parse_skill(frame, region, engine, pool)
+                        apply_skill(summary, slot, result)
+                    timings["groups"] += 1
+                except Exception as exc:
+                    print(f"解析 {group} 失败：{exc}")
+                timings["parse_ms"] += (time.perf_counter() - group_start) * 1000
+            timings["parses"] += 1
+            last_batch_ms = (time.perf_counter() - batch_start) * 1000
 
-        with state.lock:
-            stats = dict(state.stats)
-        write_latest({
-            "active": True,
-            "session": str(session),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "elapsed_s": round(elapsed, 3),
-            "battle": battle,
-            "state": summary,
-            "events": list(event_history),
-            "timings": {
-                "last_parse_ms": round(batch_ms, 1),
-                "groups": timings["groups"],
-                "parse_ms": round(timings["parse_ms"], 1),
-                "parses": timings["parses"],
-                "events": timings["events"],
-            },
-            "stats": stats,
-        })
+            battle = is_battle_like(summary)
+            events = diff_states(previous_state, summary) if battle else []
+            if battle:
+                previous_state = copy.deepcopy(summary)
+                timings["events"] += len(events)
+                for event in events:
+                    event_history.append({
+                        "elapsed_s": round(elapsed, 1),
+                        "text": event,
+                    })
+                if events or elapsed - last_print >= 3:
+                    print(f"[{elapsed:6.1f}s] {format_state(summary)}")
+                    for event in events:
+                        print(f"           · {event}")
+                    last_print = elapsed
+                if events or elapsed - last_log >= 5:
+                    record = {
+                        "elapsed_s": round(elapsed, 3),
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "groups": groups,
+                        "events": events,
+                        "state": summary,
+                    }
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    last_log = elapsed
+                    if events and args.save_events:
+                        frames_dir.mkdir(parents=True, exist_ok=True)
+                        event_counter += 1
+                        frame.save(frames_dir / f"event_{event_counter:04d}_{elapsed:07.1f}s.png")
+            elif elapsed - last_wait >= 10:
+                print("等待战斗界面；当前画面没有完整的战斗 HUD。")
+                last_wait = elapsed
+                previous_state = None
+        # 有变化时立即推送；没有变化时每秒推一次心跳，页面据此判断监控还活着。
+        if groups or time.perf_counter() - last_publish >= 1.0:
+            publish()
     return summary, timings, list(event_history)
 
 
@@ -673,13 +673,6 @@ def run(args):
     state = MonitorState()
     stop_event = threading.Event()
     started = time.perf_counter()
-    write_latest({
-        "active": True, "session": str(session),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "elapsed_s": 0.0, "battle": False,
-        "state": empty_state(layout), "events": [],
-        "timings": {}, "stats": {},
-    })
     capture = threading.Thread(
         target=capture_loop,
         args=(api, hwnd, layout, regions, state, args.fps, args.refresh,
@@ -731,12 +724,7 @@ def run(args):
         (session / "summary.json").write_text(
             json.dumps(summary_payload, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
-        write_json_atomic(HEARTBEAT_PATH, {
-            "active": False,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "snapshots": stats["snapshots"],
-        })
-        write_latest({
+        push_state(args.server, args.token_file, {
             "active": False, "session": str(session),
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_s": round(elapsed, 3), "battle": is_battle_like(summary),
@@ -767,6 +755,10 @@ def main(argv=None):
                         help="游戏窗口标题包含的文字，默认“洛克”")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help="日志保存目录")
+    parser.add_argument("--server", default=DEFAULT_SERVER,
+                        help="实时面板服务地址，默认 http://127.0.0.1:8000")
+    parser.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE,
+                        help="服务器生成的实时面板令牌文件")
     parser.add_argument("--duration", type=float, default=0,
                         help="监控多少秒后自动停止；0 表示一直运行")
     parser.add_argument("--wait", type=float, default=0,

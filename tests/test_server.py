@@ -197,6 +197,46 @@ class TestHttp(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read()
 
+    def test_live_update_requires_token_and_state_endpoint_returns_it(self):
+        old_token = server.LIVE_TOKEN
+        server.LIVE_TOKEN = "test-live-token"
+        with server.LIVE_LOCK:
+            server.LIVE_PAYLOAD = None
+            server.LIVE_RECEIVED = None
+        try:
+            request = urllib.request.Request(
+                self.base + "/api/live/update",
+                data=json.dumps({"active": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(ctx.exception.code, 403)
+
+            state = {"active": True, "battle": True,
+                     "state": {"our": {"name": "水灵"}}}
+            request = urllib.request.Request(
+                self.base + "/api/live/update",
+                data=json.dumps(state).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "X-Roco-Live-Token": "test-live-token"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+            status, body = self.get("/api/live/state")
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["active"])
+            self.assertEqual(payload["state"]["our"]["name"], "水灵")
+            self.assertIsNotNone(payload["age_s"])
+        finally:
+            server.LIVE_TOKEN = old_token
+            with server.LIVE_LOCK:
+                server.LIVE_PAYLOAD = None
+                server.LIVE_RECEIVED = None
+
     def test_index_page(self):
         status, body = self.get("/")
         self.assertEqual(status, 200)

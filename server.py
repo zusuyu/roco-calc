@@ -21,7 +21,9 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import secrets
 import sys
+import threading
 import traceback
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,8 +41,11 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 ASSET_DIR = WEB_DIR / "assets"
 ASSET_MANIFEST = BASE_DIR / "data" / "assets.json"
-LIVE_STATE = BASE_DIR / ".cache" / "live" / "latest.json"
-LIVE_HEARTBEAT = BASE_DIR / ".cache" / "live" / "heartbeat.json"
+LIVE_TOKEN_PATH = BASE_DIR / ".cache" / "live" / "token"
+LIVE_LOCK = threading.Lock()
+LIVE_PAYLOAD = None
+LIVE_RECEIVED = None
+LIVE_TOKEN = None
 
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -53,39 +58,29 @@ STATIC_FILES = {
 MAX_REQUEST_BYTES = 10_000_000
 
 
-def _age_seconds(stamp):
-    try:
-        updated = datetime.fromisoformat(stamp or "")
-    except (TypeError, ValueError):
-        return None
-    return round((datetime.now(timezone.utc) - updated).total_seconds(), 1)
+def ensure_live_token():
+    """生成实时监控令牌并写入本机文件；监控进程读取它才能推送状态。"""
+    global LIVE_TOKEN
+    if LIVE_TOKEN:
+        return LIVE_TOKEN
+    token = secrets.token_urlsafe(24)
+    LIVE_TOKEN = token
+    LIVE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LIVE_TOKEN_PATH.write_text(token + "\n", encoding="utf-8")
+    return token
 
 
 def read_live_state():
-    """读取实时监控写入的最新状态；没有运行时返回 active=false。
-
-    截图线程每秒写一次心跳，页面用心跳判断监控是否还活着；没有状态变化
-    时 latest.json 的 updated_at 可以是旧的，但心跳仍然是新的。
-    """
-    try:
-        payload = json.loads(LIVE_STATE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        payload = {"active": False}
-    parse_age = _age_seconds(payload.get("updated_at"))
-    heartbeat = {}
-    try:
-        heartbeat = json.loads(LIVE_HEARTBEAT.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        pass
-    beat_age = _age_seconds(heartbeat.get("updated_at")) if heartbeat else None
-    if beat_age is not None:
-        payload["snapshots"] = heartbeat.get("snapshots")
-        payload["beat_age_s"] = beat_age
-        payload["age_s"] = beat_age
-    else:
-        payload["age_s"] = parse_age
-    payload["parse_age_s"] = parse_age
-    return payload
+    """返回监控推送的最新状态；没有推送时 active=false。"""
+    with LIVE_LOCK:
+        payload = LIVE_PAYLOAD
+        received = LIVE_RECEIVED
+    if not payload:
+        return {"active": False, "age_s": None}
+    result = dict(payload)
+    result["age_s"] = (round((datetime.now(timezone.utc) - received)
+                             .total_seconds(), 1) if received else None)
+    return result
 
 
 def _skill_priority(desc):
@@ -312,6 +307,39 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_bytes(200, file_path.read_bytes(), content_type)
 
+    def _handle_live_update(self):
+        """接收实时监控推送的状态；只接受带本机令牌的请求。"""
+        global LIVE_PAYLOAD, LIVE_RECEIVED
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json(400, {"error": "状态长度不合法。"})
+            return
+        if length <= 0:
+            self._send_json(400, {"error": "状态内容为空。"})
+            return
+        if length > 2_000_000:
+            self._send_json(413, {"error": "状态内容太大。"})
+            return
+        token = self.headers.get("X-Roco-Live-Token") or ""
+        if not LIVE_TOKEN or not secrets.compare_digest(token, LIVE_TOKEN):
+            self._send_json(403, {"error": "实时监控令牌不正确。"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(400, {"error": "状态不是合法的 JSON。"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "状态必须是对象。"})
+            return
+        with LIVE_LOCK:
+            LIVE_PAYLOAD = payload
+            LIVE_RECEIVED = datetime.now(timezone.utc)
+        self._send_json(200, {"ok": True})
+
     def _handle_ocr_frame(self):
         parsed = urlsplit(self.path)
         query = parse_qs(parsed.query)
@@ -371,6 +399,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ocr/frame":
             self._handle_ocr_frame()
             return
+        if path == "/api/live/update":
+            self._handle_live_update()
+            return
         if path not in ("/api/analyze", "/api/team", "/api/battle"):
             self._send_json(404, {"error": "找不到这个地址。"})
             return
@@ -422,6 +453,7 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8000, help="端口，默认 8000")
     args = parser.parse_args(argv)
 
+    ensure_live_token()
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
