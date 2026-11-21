@@ -16,6 +16,7 @@ class TestOcrService(unittest.TestCase):
         ids = {item["id"] for item in layouts}
         self.assertIn("ocr_reference4", ids)
         self.assertIn("ocr_1600x900_on_1920x1080", ids)
+        self.assertIn("ocr_1602x932_window", ids)
         for item in layouts:
             self.assertEqual(len(item["image_size"]), 2)
             self.assertTrue((ocr.ROOT / item["path"]).is_file())

@@ -75,6 +75,16 @@ class TestStructuredFrame(unittest.TestCase):
         validate_layout(layout, (1920, 1080))
         validate_layout(layout, (1600, 900))
 
+    def test_wegame_1602_by_932_window_is_cropped_to_content(self):
+        path = Path(__file__).resolve().parents[1] / "configs" / "ocr_1602x932_window.json"
+        layout = json.loads(path.read_text())
+        self.assertEqual(
+            resolve_frame_region(layout, (1602, 932)),
+            [1, 32, 1601, 932],
+        )
+        validate_layout(layout, (1602, 932))
+        validate_layout(layout, (1600, 900))
+
     def test_title_bar_or_out_of_screen_viewport_is_rejected(self):
         layout = {"image_size": [1600, 900], "screen_size": [1920, 1080]}
         for box in ([160, 36, 1760, 966], [-1, 66, 1599, 966],

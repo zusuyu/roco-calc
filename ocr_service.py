@@ -77,10 +77,22 @@ def list_layouts():
             or any(type(value) is not int or value <= 0 for value in size)
         ):
             continue
+        screen = payload.get("screen_size")
+        if (
+            isinstance(screen, list)
+            and len(screen) == 2
+            and all(type(value) is int and value > 0 for value in screen)
+        ):
+            label = (
+                f"{path.stem} · 窗口 {screen[0]}×{screen[1]} / "
+                f"内容 {size[0]}×{size[1]}"
+            )
+        else:
+            label = f"{path.stem} · {size[0]}×{size[1]}"
         layouts.append(
             {
                 "id": path.stem,
-                "label": f"{path.stem} · {size[0]}×{size[1]}",
+                "label": label,
                 "path": _relative(path),
                 "image_size": size,
             }
