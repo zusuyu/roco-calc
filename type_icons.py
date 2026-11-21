@@ -45,7 +45,8 @@ UPPER_OFFSET = (-0.005, 0.50)
 
 # 搜索范围按头像框高度缩放；分数越低越像。
 SEARCH_PAD_RATIO = 0.12
-RADIUS_RANGE = (0.10, 0.22)
+RADIUS_HINT_RATIO = 0.14
+RADIUS_HINT_SPAN = 2
 MIN_RADIUS = 6
 MAX_RADIUS = 20
 # 实测：正确图标分数约 100～1300，空位在 8000 以上，所以 3000 是安全分界。
@@ -77,8 +78,10 @@ def search_region(avatar_box, frame_size):
 
 
 def radii(height):
-    low = max(MIN_RADIUS, round(RADIUS_RANGE[0] * height))
-    high = min(MAX_RADIUS, round(RADIUS_RANGE[1] * height))
+    """图标直径和头像框大致成比例；在已知半径附近搜索，减少模板比对次数。"""
+    hint = max(MIN_RADIUS, min(MAX_RADIUS, round(height * RADIUS_HINT_RATIO)))
+    low = max(MIN_RADIUS, hint - RADIUS_HINT_SPAN)
+    high = min(MAX_RADIUS, hint + RADIUS_HINT_SPAN)
     return range(low, high + 1)
 
 
@@ -127,9 +130,39 @@ def _empty(status="unavailable", reason=None):
     return result
 
 
-def _detect_slot(roi, origin, center, templates, height):
+@lru_cache(maxsize=512)
+def _prepared(number, flip, radius):
+    """预先把模板缩放到目标半径并生成圆形遮罩；同一布局会反复用到。"""
     import cv2
     import numpy as np
+
+    template = load_templates()[number]
+    if flip:
+        template = cv2.flip(template, 1)
+    diameter = radius * 2
+    resized = cv2.resize(template, (diameter, diameter),
+                         interpolation=cv2.INTER_AREA)[:, :, :3]
+    mask = np.zeros((diameter, diameter), np.float32)
+    cv2.circle(mask, (radius, radius), int(radius * 0.86), 1, -1)
+    return resized, mask
+
+
+def _build_prepared(template, flip, radius):
+    import cv2
+    import numpy as np
+
+    if flip:
+        template = cv2.flip(template, 1)
+    diameter = radius * 2
+    resized = cv2.resize(template, (diameter, diameter),
+                         interpolation=cv2.INTER_AREA)[:, :, :3]
+    mask = np.zeros((diameter, diameter), np.float32)
+    cv2.circle(mask, (radius, radius), int(radius * 0.86), 1, -1)
+    return resized, mask
+
+
+def _detect_slot(roi, origin, center, templates, height, cacheable=True):
+    import cv2
 
     x0, y0 = origin
     cx, cy = center[0] - x0, center[1] - y0
@@ -138,7 +171,7 @@ def _detect_slot(roi, origin, center, templates, height):
     locations = {}
     for number, template in templates.items():
         top = (float("inf"), None)
-        for flipped in (template, cv2.flip(template, 1)):
+        for flip in (0, 1):
             for radius in radii(height):
                 diameter = radius * 2
                 px0 = max(0, cx - radius - pad)
@@ -147,11 +180,10 @@ def _detect_slot(roi, origin, center, templates, height):
                 py1 = min(roi.shape[0], cy + radius + pad)
                 if px1 - px0 < diameter + 2 * pad or py1 - py0 < diameter + 2 * pad:
                     continue
-                resized = cv2.resize(
-                    flipped, (diameter, diameter), interpolation=cv2.INTER_AREA
-                )[:, :, :3]
-                mask = np.zeros((diameter, diameter), np.float32)
-                cv2.circle(mask, (radius, radius), int(radius * 0.86), 1, -1)
+                if cacheable:
+                    resized, mask = _prepared(number, flip, radius)
+                else:
+                    resized, mask = _build_prepared(template, flip, radius)
                 result = cv2.matchTemplate(
                     roi[py0:py1, px0:px1], resized, cv2.TM_SQDIFF, mask=mask
                 )
@@ -188,6 +220,7 @@ def detect_types(image, avatar_box, templates=None):
     box = [int(value) for value in avatar_box]
     if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
         return _empty("unresolved", "头像框无效")
+    cacheable = templates is None
     templates = load_templates() if templates is None else templates
     if len(templates) < 2:
         return _empty("unavailable", "本机还没有属性图标")
@@ -200,8 +233,10 @@ def detect_types(image, avatar_box, templates=None):
     centers = slot_centers(box)
     height = box[3] - box[1]
     origin = (region[0], region[1])
-    lower = _detect_slot(pixels, origin, centers["lower"], templates, height)
-    upper = _detect_slot(pixels, origin, centers["upper"], templates, height)
+    lower = _detect_slot(pixels, origin, centers["lower"], templates, height,
+                         cacheable=cacheable)
+    upper = _detect_slot(pixels, origin, centers["upper"], templates, height,
+                         cacheable=cacheable)
     primary = lower["type"]
     secondary = upper["type"] if primary else None
     if primary and secondary:

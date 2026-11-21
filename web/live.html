@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实时监控 · 洛克王国世界</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #10151c;
+    --panel: #18212c;
+    --panel-2: #1f2b38;
+    --line: #2c3b4d;
+    --text: #e8eef6;
+    --muted: #8fa3b8;
+    --good: #6ee7a8;
+    --bad: #ff8a8a;
+    --accent: #79b8ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at top, #162231 0, var(--bg) 55%);
+    color: var(--text);
+    font: 14px/1.5 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(16, 21, 28, .85);
+    position: sticky;
+    top: 0;
+    backdrop-filter: blur(6px);
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: 1px; }
+  .status {
+    padding: 3px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .status.on { color: var(--good); border-color: #2f6b4d; background: #12261c; }
+  .status.off { color: var(--bad); border-color: #6b2f2f; background: #261212; }
+  .spacer { flex: 1; }
+  a { color: var(--accent); text-decoration: none; }
+  main { padding: 20px 24px 40px; display: grid; gap: 16px; max-width: 1240px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+  }
+  .card h2 { margin: 0 0 10px; font-size: 15px; color: var(--muted); font-weight: 600; }
+  .species { font-size: 22px; font-weight: 700; }
+  .species small { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+  .stat { background: #131b24; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .stat span { display: block; color: var(--muted); font-size: 12px; }
+  .stat strong { font-size: 18px; }
+  .types { margin-top: 10px; color: var(--muted); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  .events { max-height: 260px; overflow: auto; }
+  .event { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed #243243; }
+  .event:last-child { border-bottom: 0; }
+  .event time { color: var(--muted); min-width: 58px; font-variant-numeric: tabular-nums; }
+  .footer { color: var(--muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; }
+  .empty { color: var(--muted); padding: 16px 0; }
+  @media (max-width: 760px) {
+    .cards { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>实时监控</h1>
+  <span id="status" class="status">读取中…</span>
+  <span id="session" class="status">会话：—</span>
+  <span class="spacer"></span>
+  <a href="/">返回伤害计算</a>
+</header>
+<main>
+  <section class="cards">
+    <article class="card" id="our-card">
+      <h2>我方</h2>
+      <div class="species" id="our-name">—</div>
+      <div class="types" id="our-types"></div>
+      <div class="stats">
+        <div class="stat"><span>生命</span><strong id="our-hp">—</strong></div>
+        <div class="stat"><span>能量</span><strong id="our-energy">—</strong></div>
+        <div class="stat"><span>身份来源</span><strong id="our-source">—</strong></div>
+      </div>
+    </article>
+    <article class="card" id="opp-card">
+      <h2>对方</h2>
+      <div class="species" id="opp-name">—</div>
+      <div class="types" id="opp-types"></div>
+      <div class="stats">
+        <div class="stat"><span>生命</span><strong id="opp-hp">—</strong></div>
+        <div class="stat"><span>能量</span><strong id="opp-energy">—</strong></div>
+        <div class="stat"><span>身份来源</span><strong id="opp-source">—</strong></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="card">
+    <h2>我方技能</h2>
+    <table>
+      <thead>
+        <tr><th>槽位</th><th>技能</th><th>类型</th><th>威力</th><th>能耗</th><th>冷却</th></tr>
+      </thead>
+      <tbody id="skills"></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>最近变化</h2>
+    <div class="events" id="events"><div class="empty">还没有识别到变化。</div></div>
+  </section>
+
+  <div class="footer">
+    <span id="updated">最后更新：—</span>
+    <span id="timing">解析耗时：—</span>
+    <span id="stats">快照：—</span>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+function text(value, fallback = "—") {
+  return value === null || value === undefined || value === "" ? fallback : String(value);
+}
+
+function species(side) {
+  if (!side) return "—";
+  const name = side.name ? side.name + (side.form ? `（${side.form}）` : "") : null;
+  const display = side.display;
+  if (name && display && name !== display) return `${name} / ${display}`;
+  return name || display || "未识别";
+}
+
+function typesText(side) {
+  const list = (side && side.types) || [];
+  return list.length ? `属性：${list.join(" / ")}` : "属性：—";
+}
+
+function sourceText(side) {
+  const source = side && side.identity_source;
+  return { provided: "手动指定", avatar: "头像", avatar_and_name: "头像+名字" }[source] || source || "—";
+}
+
+function renderSkills(skills) {
+  const body = $("skills");
+  body.replaceChildren();
+  if (!skills || !skills.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">还没有读到技能。</td></tr>';
+    return;
+  }
+  for (const skill of skills) {
+    const row = document.createElement("tr");
+    const cooldown = skill.cooldown === null || skill.cooldown === undefined ? "—" : `${skill.cooldown} 回合`;
+    row.innerHTML = `
+      <td class="num">${text(skill.slot)}</td>
+      <td>${text(skill.name, "未识别")}</td>
+      <td>${text(skill.category)}</td>
+      <td class="num">${text(skill.power, "—")}</td>
+      <td class="num">${text(skill.energy, "?")}</td>
+      <td class="num">${cooldown}</td>`;
+    body.append(row);
+  }
+}
+
+function renderEvents(events) {
+  const box = $("events");
+  box.replaceChildren();
+  if (!events || !events.length) {
+    box.innerHTML = '<div class="empty">还没有识别到变化。</div>';
+    return;
+  }
+  for (const event of events.slice(-30)) {
+    const row = document.createElement("div");
+    row.className = "event";
+    row.innerHTML = `<time>${event.elapsed_s}s</time><span>${event.text}</span>`;
+    box.append(row);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function render(payload) {
+  const active = Boolean(payload.active);
+  const age = payload.age_s;
+  const stale = active && age !== null && age > 5;
+  const status = $("status");
+  status.className = "status " + (active && !stale ? "on" : "off");
+  status.textContent = active
+    ? (stale ? `可能已暂停（${Math.round(age)} 秒没更新）` : `运行中 · ${payload.battle ? "战斗界面" : "等待战斗"}`)
+    : "监控未运行";
+  $("session").textContent = payload.session
+    ? `会话：${payload.session.split(/[\\\\/]/).pop()}`
+    : "会话：—";
+  const state = payload.state || {};
+  const our = state.our || {};
+  const opp = state.opponent || {};
+  $("our-name").textContent = species(our);
+  $("opp-name").textContent = species(opp);
+  $("our-types").textContent = typesText(our);
+  $("opp-types").textContent = typesText(opp);
+  $("our-hp").textContent = our.hp !== null && our.hp !== undefined
+    ? `${our.hp}/${text(our.max_hp, "?")}` : (our.hp_percent !== null && our.hp_percent !== undefined
+      ? `${our.hp_percent}%` : "—");
+  $("opp-hp").textContent = opp.hp_percent !== null && opp.hp_percent !== undefined
+    ? `${opp.hp_percent}%` : (opp.hp !== null && opp.hp !== undefined
+      ? `${opp.hp}/${text(opp.max_hp, "?")}` : "—");
+  $("our-energy").textContent = text(our.energy);
+  $("opp-energy").textContent = text(opp.energy);
+  $("our-source").textContent = sourceText(our);
+  $("opp-source").textContent = sourceText(opp);
+  renderSkills(state.skills);
+  renderEvents(payload.events);
+  $("updated").textContent = payload.updated_at
+    ? `最后更新：${new Date(payload.updated_at).toLocaleTimeString()}`
+    : "最后更新：—";
+  const timings = payload.timings || {};
+  $("timing").textContent = timings.last_parse_ms !== undefined
+    ? `最近解析：${timings.last_parse_ms} 毫秒`
+    : "解析耗时：—";
+  const stats = payload.stats || {};
+  $("stats").textContent = stats.snapshots !== undefined
+    ? `快照：${stats.snapshots} 张 · 抓图 ${(stats.capture_ms / Math.max(1, stats.snapshots)).toFixed(1)} 毫秒/张`
+    : "快照：—";
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/live/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    render(await response.json());
+  } catch (error) {
+    const status = $("status");
+    status.className = "status off";
+    status.textContent = `读取失败：${error.message}`;
+  }
+  setTimeout(poll, 500);
+}
+
+poll();
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@ python ocr_skills.py 参考2.jpg --crop 210 335 415 750 --scale 3 --pet 花衣�
 
 import argparse
 import csv
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -27,7 +28,8 @@ def edit_distance(left, right):
     return previous[-1]
 
 
-def load_skill_pool(pet_name=None, form=None):
+@lru_cache(maxsize=64)
+def _load_skill_pool_cached(pet_name, form):
     pet = rc.find_pet(pet_name, form) if pet_name else None
     with (ROOT / "data" / "learnsets.csv").open(
         encoding="utf-8-sig", newline=""
@@ -47,6 +49,11 @@ def load_skill_pool(pet_name=None, form=None):
     if not pool:
         raise ValueError("没有找到可用的技能池；请核对精灵和形态。")
     return pool
+
+
+def load_skill_pool(pet_name=None, form=None):
+    """技能池只读且按精灵缓存；实时监控不要每帧重读 learnsets.csv。"""
+    return _load_skill_pool_cached(pet_name, form)
 
 
 def match_skill(text, confidence, pool):

@@ -188,7 +188,10 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=Fa
     selected = select_number(readings, min_single=min_single, zero_like=zero_like)
     if selected is not None:
         return selected, readings
+    # 重读一旦凑够“两次一致”或单个高置信读数就立即停止，不再固定跑完
+    # 3 个角度 × 4 种变体；最坏情况最多再做 5 次 OCR。
     height, width = pixels.shape[:2]
+    attempts = 0
     for angle in (-15, 0, 15):
         matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1)
         rotated = cv2.warpAffine(pixels, matrix, (width, height),
@@ -198,13 +201,22 @@ def retry_number(crop, engine, initial_reading=None, relaxed=False, zero_like=Fa
                     cv2.THRESH_BINARY)[1] for channel, threshold in
                     ((gray, 100), (gray, 160), (rotated[:, :, 2], 160))]
         for variant in variants:
+            if attempts >= 5:
+                break
             border = 255 if variant.ndim == 2 else (255, 255, 255)
             variant = cv2.copyMakeBorder(variant, 15, 15, 15, 15,
                         cv2.BORDER_CONSTANT, value=border)
             result = engine(variant, use_det=False, use_cls=False)
+            attempts += 1
             if result.txts:
                 readings.append({"text": result.txts[0],
                                  "confidence": float(result.scores[0])})
+                selected = select_number(readings, min_single=min_single,
+                                         zero_like=zero_like)
+                if selected is not None:
+                    return selected, readings
+        if attempts >= 5:
+            break
     return select_number(readings, min_single=min_single,
                          zero_like=zero_like), readings
 
@@ -285,6 +297,106 @@ def skill_result(slot, readings, displayed_power, energy_cost,
     }
 
 
+def load_pool_for(identity):
+    return (load_skill_pool(identity["name"], identity["form"])
+            if identity else load_skill_pool())
+
+
+def parse_identity(image, side, layout, engine, avatar_matcher=None, provided=None):
+    """只解析显示名、属性图标和头像；监控在头像/名字区域变化时调用。"""
+    label, label_reading = read_field(
+        image, layout[side]["display_name"], engine, detect_fallback=True
+    )
+    label = clean_label(label)
+    if label_reading.get("text") != label:
+        label_reading["raw_text"] = label_reading.get("text")
+    label_reading["text"] = label
+    detected_types = None
+    avatar = None
+    identity = provided
+    source = "provided" if provided else None
+    if avatar_matcher is not None and "avatar" in layout[side]:
+        detected_types = detect_types(image, layout[side]["avatar"])
+        avatar = avatar_matcher.match(
+            image.crop(layout[side]["avatar"]),
+            label,
+            min_score=float(layout.get("avatar_min_score", 0.90)),
+            min_margin=float(layout.get("avatar_min_margin", 0.08)),
+            types=(detected_types or {}).get("pair") or None,
+        )
+        if identity is None and avatar["identity"] is not None:
+            identity = avatar["identity"]
+            source = ("avatar_and_name"
+                      if avatar["status"] == "visual_name_supported" else "avatar")
+    return {
+        "label": label, "label_reading": label_reading,
+        "types": detected_types, "avatar": avatar,
+        "identity": identity, "source": source,
+    }
+
+
+def parse_status(image, side, layout, engine):
+    """只解析生命和当前能量；监控在数值区域变化时调用。"""
+    energy, energy_reading = read_field(
+        image, layout[side]["energy"], engine, True, relaxed=True
+    )
+    result = {
+        "energy": energy, "energy_reading": energy_reading,
+        "hp": None, "max_hp": None, "hp_percent": None,
+        "hp_reading": None, "percent_reading": None,
+    }
+    if "hp" in layout[side]:
+        hp_text, hp_reading = read_field(
+            image, layout[side]["hp"], engine, scale=5
+        )
+        hp, max_hp = parse_hp(hp_text)
+        hp_reading["status"] = "recognized" if hp is not None else "unresolved"
+        result.update(hp=hp, max_hp=max_hp, hp_reading=hp_reading)
+    if "hp_percent" in layout[side]:
+        text, percent_reading = read_field(
+            image, layout[side]["hp_percent"], engine, scale=5
+        )
+        match = re.fullmatch(r"([0-9]{1,3})\s*%", text or "")
+        percent = int(match.group(1)) if match else None
+        if percent is not None and not 0 <= percent <= 100:
+            percent = None
+        percent_reading["status"] = ("recognized" if percent is not None
+                                     else "unresolved")
+        result.update(hp_percent=percent, percent_reading=percent_reading)
+    return result
+
+
+def parse_skill(image, region, engine, pool):
+    """只解析一个技能槽；监控在该槽区域变化时调用。"""
+    crop = image.crop(region["name"])
+    crop = crop.resize((crop.width * 3, crop.height * 3))
+    detected = recognize(crop, pool, engine, single_line=True)
+    rows = detected["skill_readings"]
+    category = rows[0].get("category") if len(rows) == 1 else None
+    if category in ("防御", "状态"):
+        power, power_reading = None, {"status": "not_applicable"}
+    else:
+        power, power_reading = read_field(image, region["power"], engine, True)
+    cost, cost_reading = read_field(
+        image, region["energy_cost"], engine, True, zero_like=True
+    )
+    cooldown = None
+    cooldown_reading = None
+    if "cooldown" in region and has_red_glyph(image, region["cooldown"]):
+        cooldown, cooldown_reading = read_field(
+            image, region["cooldown"], engine, True
+        )
+    result = skill_result(
+        region["slot"], rows, power, cost, cost_reading, cooldown
+    )
+    diagnostics = {
+        "slot": region["slot"], **detected,
+        "power": power_reading, "energy_cost": cost_reading,
+        "cooldown": cooldown_reading,
+    }
+    return result, diagnostics
+
+
 def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=None,
                   debug=False, avatar_matcher=None):
     validate_layout(layout, image.size)
@@ -293,91 +405,34 @@ def analyze_frame(image, layout, engine, our_identity=None, opponent_identity=No
     image = image.crop(viewport)
     output = {"schema_version": 1, "frame_type": "operation", "skills": []}
     diagnostics = {"pets": {}, "skills": []}
-    for side, identity in (("our", our_identity), ("opponent", opponent_identity)):
-        label, label_reading = read_field(
-            image, layout[side]["display_name"], engine, detect_fallback=True
-        )
-        label = clean_label(label)
-        if label_reading.get("text") != label:
-            label_reading["raw_text"] = label_reading.get("text")
-        label_reading["text"] = label
-        energy, energy_reading = read_field(
-            image, layout[side]["energy"], engine, True, relaxed=True,
-        )
-        detected_types = None
-        if avatar_matcher is not None and "avatar" in layout[side]:
-            detected_types = detect_types(image, layout[side]["avatar"])
-        avatar = None
-        source = "provided"
-        if avatar_matcher is not None and "avatar" in layout[side]:
-            avatar = avatar_matcher.match(
-                image.crop(layout[side]["avatar"]),
-                label,
-                min_score=float(layout.get("avatar_min_score", 0.90)),
-                min_margin=float(layout.get("avatar_min_margin", 0.08)),
-                types=(detected_types or {}).get("pair") or None,
-            )
-            if identity is None and avatar["identity"] is not None:
-                identity = avatar["identity"]
-                source = "avatar_and_name" if avatar["status"] == "visual_name_supported" else "avatar"
+    for side, provided in (("our", our_identity), ("opponent", opponent_identity)):
+        ident = parse_identity(image, side, layout, engine, avatar_matcher, provided)
         if side == "our":
-            our_identity = identity
-        output[side] = pet_result(label, energy, identity, source)
-        if detected_types is not None:
-            output[side]["types"] = detected_types
-        if avatar is not None:
-            output[side]["avatar_match"] = avatar
+            our_identity = ident["identity"]
+        status = parse_status(image, side, layout, engine)
+        output[side] = pet_result(
+            ident["label"], status["energy"], ident["identity"],
+            ident["source"] or "unresolved",
+        )
+        if ident["types"] is not None:
+            output[side]["types"] = ident["types"]
+        if ident["avatar"] is not None:
+            output[side]["avatar_match"] = ident["avatar"]
         diagnostics["pets"][side] = {
-            "display_name": label_reading, "energy": energy_reading,
+            "display_name": ident["label_reading"],
+            "energy": status["energy_reading"],
         }
         if "hp" in layout[side]:
-            hp_text, hp_reading = read_field(
-                image, layout[side]["hp"], engine, scale=5
-            )
-            hp, max_hp = parse_hp(hp_text)
-            output[side].update(hp=hp, max_hp=max_hp)
-            hp_reading["status"] = "recognized" if hp is not None else "unresolved"
-            diagnostics["pets"][side]["hp"] = hp_reading
+            output[side].update(hp=status["hp"], max_hp=status["max_hp"])
+            diagnostics["pets"][side]["hp"] = status["hp_reading"]
         if "hp_percent" in layout[side]:
-            text, percent_reading = read_field(
-                image, layout[side]["hp_percent"], engine, scale=5
-            )
-            match = re.fullmatch(r"([0-9]{1,3})\s*%", text or "")
-            percent = int(match.group(1)) if match else None
-            if percent is not None and not 0 <= percent <= 100:
-                percent = None
-            output[side]["hp_percent"] = percent
-            percent_reading["status"] = "recognized" if percent is not None else "unresolved"
-            diagnostics["pets"][side]["hp_percent"] = percent_reading
-    pool = load_skill_pool(our_identity["name"], our_identity["form"]) \
-        if our_identity else load_skill_pool()
+            output[side]["hp_percent"] = status["hp_percent"]
+            diagnostics["pets"][side]["hp_percent"] = status["percent_reading"]
+    pool = load_pool_for(our_identity)
     for region in sorted(layout["skills"], key=lambda item: item["slot"]):
-        crop = image.crop(region["name"])
-        crop = crop.resize((crop.width * 3, crop.height * 3))
-        detected = recognize(crop, pool, engine, single_line=True)
-        rows = detected["skill_readings"]
-        category = rows[0].get("category") if len(rows) == 1 else None
-        if category in ("防御", "状态"):
-            power, power_reading = None, {"status": "not_applicable"}
-        else:
-            power, power_reading = read_field(image, region["power"], engine, True)
-        cost, cost_reading = read_field(
-            image, region["energy_cost"], engine, True, zero_like=True
-        )
-        cooldown = None
-        cooldown_reading = None
-        if "cooldown" in region and has_red_glyph(image, region["cooldown"]):
-            cooldown, cooldown_reading = read_field(
-                image, region["cooldown"], engine, True
-            )
-        output["skills"].append(skill_result(
-            region["slot"], rows, power, cost, cost_reading, cooldown
-        ))
-        diagnostics["skills"].append({
-            "slot": region["slot"], **detected,
-            "power": power_reading, "energy_cost": cost_reading,
-            "cooldown": cooldown_reading,
-        })
+        result, skill_diagnostics = parse_skill(image, region, engine, pool)
+        output["skills"].append(result)
+        diagnostics["skills"].append(skill_diagnostics)
     if debug:
         diagnostics.update(source_size=list(source_size), viewport=viewport,
                            frame_size=list(image.size))

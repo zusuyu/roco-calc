@@ -8,8 +8,10 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_monitor import (diff_states, format_state, is_battle_like,
-                          pick_window, state_summary, wait_for_window)
+from live_monitor import (apply_identity, apply_skill, apply_status,
+                          build_regions, diff_states, empty_state,
+                          format_state, is_battle_like, pick_window,
+                          signature_delta, state_summary, wait_for_window)
 
 
 class Box:
@@ -99,7 +101,16 @@ class TestStateSummary(unittest.TestCase):
 
     def test_menu_screens_are_not_battle_like(self):
         self.assertFalse(is_battle_like(state()))
-        self.assertTrue(is_battle_like(state(skills=[skill(1, "水泡盾")])))
+        # 菜单页偶尔会读出技能名，不能只凭一个技能名就当成战斗。
+        self.assertFalse(is_battle_like(state(skills=[skill(1, "水泡盾")])))
+        self.assertTrue(is_battle_like(state(
+            our=side("水灵", "蓝蓝", energy=10),
+            skills=[skill(1, "水泡盾")],
+        )))
+        self.assertTrue(is_battle_like(state(
+            our=side("水灵", "蓝蓝", hp=434, max_hp=434, energy=10),
+            opponent=side("小独角兽", percent=100, energy=10),
+        )))
 
 
 class TestStateDiff(unittest.TestCase):
@@ -151,6 +162,65 @@ class TestFormat(unittest.TestCase):
         self.assertIn("我方 水灵（蓝蓝） 434/434 能量10", text)
         self.assertIn("对方 小独角兽 100% 能量10", text)
         self.assertIn("水泡盾(冷却1)", text)
+
+
+LAYOUT = {
+    "our": {"avatar": [34, 16, 111, 88], "display_name": [92, 35, 185, 59],
+            "energy": [224, 83, 248, 105], "hp": [135, 60, 205, 80]},
+    "opponent": {"avatar": [1337, 21, 1396, 83],
+                 "display_name": [1398, 35, 1458, 60],
+                 "energy": [1419, 84, 1443, 107],
+                 "hp_percent": [1449, 60, 1500, 79]},
+    "skills": [{"slot": slot, "name": [200 + slot, 300, 240 + slot, 320],
+                "power": [210 + slot, 300, 250 + slot, 320],
+                "energy_cost": [220 + slot, 300, 260 + slot, 320],
+                "cooldown": [230 + slot, 300, 270 + slot, 320]}
+               for slot in (1, 2, 3, 4)],
+}
+
+
+class TestRegionsAndMerging(unittest.TestCase):
+    def test_regions_cover_identity_status_and_each_skill(self):
+        regions = build_regions(LAYOUT)
+        self.assertEqual(set(regions), {
+            "identity_our", "identity_opponent", "status_our",
+            "status_opponent", "skill_1", "skill_2", "skill_3", "skill_4",
+        })
+        # 我方身份区域要包含头像左侧的属性图标和显示名右边界。
+        self.assertEqual(regions["identity_our"], [14, 16, 185, 103])
+        # 技能区域要包含名字、威力、能耗和冷却四个框。
+        self.assertEqual(regions["skill_1"], [201, 300, 271, 320])
+
+    def test_signature_delta_detects_changes(self):
+        base = [[10, 20], [30, 40]]
+        self.assertEqual(signature_delta(base, base), 0.0)
+        changed = [[10, 20], [30, 60]]
+        self.assertGreater(signature_delta(base, changed), 0.0)
+        self.assertEqual(signature_delta(None, base), 255.0)
+
+    def test_apply_identity_status_and_skill_merge_into_state(self):
+        summary = empty_state(LAYOUT)
+        apply_identity(summary, "our", {
+            "label": "蓝蓝", "identity": {"name": "水灵", "number": "010",
+                                          "form": None},
+            "types": {"pair": ["水系"]}, "avatar": {"status": "visual_supported"},
+            "source": "avatar",
+        })
+        self.assertEqual(summary["our"]["name"], "水灵")
+        self.assertEqual(summary["our"]["display"], "蓝蓝")
+        self.assertEqual(summary["our"]["types"], ["水系"])
+        apply_status(summary, "our", {
+            "energy": 8, "hp": 390, "max_hp": 434, "hp_percent": None,
+        }, LAYOUT)
+        self.assertEqual(summary["our"]["hp"], 390)
+        self.assertEqual(summary["our"]["energy"], 8)
+        apply_skill(summary, 2, {
+            "name": "水炮", "category": "攻击", "power": 93,
+            "energy_cost": 3, "energy_cost_status": "recognized",
+            "cooldown": None,
+        })
+        self.assertEqual(summary["skills"][1]["name"], "水炮")
+        self.assertEqual(summary["skills"][1]["power"], 93)
 
 
 if __name__ == "__main__":

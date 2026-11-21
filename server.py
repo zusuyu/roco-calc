@@ -19,6 +19,7 @@
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import sys
 import traceback
@@ -38,15 +39,53 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 ASSET_DIR = WEB_DIR / "assets"
 ASSET_MANIFEST = BASE_DIR / "data" / "assets.json"
+LIVE_STATE = BASE_DIR / ".cache" / "live" / "latest.json"
+LIVE_HEARTBEAT = BASE_DIR / ".cache" / "live" / "heartbeat.json"
 
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/live": ("live.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
 
 MAX_REQUEST_BYTES = 10_000_000
+
+
+def _age_seconds(stamp):
+    try:
+        updated = datetime.fromisoformat(stamp or "")
+    except (TypeError, ValueError):
+        return None
+    return round((datetime.now(timezone.utc) - updated).total_seconds(), 1)
+
+
+def read_live_state():
+    """读取实时监控写入的最新状态；没有运行时返回 active=false。
+
+    截图线程每秒写一次心跳，页面用心跳判断监控是否还活着；没有状态变化
+    时 latest.json 的 updated_at 可以是旧的，但心跳仍然是新的。
+    """
+    try:
+        payload = json.loads(LIVE_STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {"active": False}
+    parse_age = _age_seconds(payload.get("updated_at"))
+    heartbeat = {}
+    try:
+        heartbeat = json.loads(LIVE_HEARTBEAT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    beat_age = _age_seconds(heartbeat.get("updated_at")) if heartbeat else None
+    if beat_age is not None:
+        payload["snapshots"] = heartbeat.get("snapshots")
+        payload["beat_age_s"] = beat_age
+        payload["age_s"] = beat_age
+    else:
+        payload["age_s"] = parse_age
+    payload["parse_age_s"] = parse_age
+    return payload
 
 
 def _skill_priority(desc):
@@ -253,6 +292,9 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             force = query.get("force", [""])[0] in ("1", "true", "yes")
             self._send_json(200, ocr.status(force=force))
+            return
+        if path == "/api/live/state":
+            self._send_json(200, read_live_state())
             return
         if path.startswith("/assets/"):
             self._send_asset(path)

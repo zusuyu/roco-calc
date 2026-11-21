@@ -19,7 +19,7 @@
 - “当前出战”伤害表使用对局记录推断出的对方范围、当前生命、双方增减益、天气和星陨；对局中也可以点击任意我方/对方位置查看其他对位。未建模的印记/状态会在表上方提示。
 - 队伍卡片只配置精灵、性格、天分和技能；生命、能量、增减益由对局记录提供，不再手动填写。
 
-当前有 **279 个自动测试**，全部通过。
+当前有 **282 个自动测试**，全部通过。
 
 ## 最快上手
 
@@ -86,7 +86,7 @@ web/assets/types/    18 个属性图标（识别头像左下角用）
 PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -v
 ```
 
-应看到 `Ran 279 tests` 和 `OK`。
+应看到 `Ran 282 tests` 和 `OK`。
 
 ### Windows独立持续截图工具
 
@@ -138,17 +138,25 @@ python -m venv .venv-ocr314
 .venv-ocr314\Scripts\python live_monitor.py
 ```
 
-它会锁定标题含“洛克”的游戏窗口，每 2 秒截取一次内容区域并识别双方精灵、属性、生命、能量、四个技能和冷却；有变化时在控制台打印，并写入 `.cache/live/session_*/state.jsonl`。工具只截图，不读游戏内存、不修改游戏。
+工作方式：
+
+- 每 **0.1 秒**截取一次游戏内容区域（默认 10 FPS）；
+- 对每个解析区域先做灰度缩略图差异比较（纯像素比较，约 1～2 毫秒/张），**只有变化的区域才触发 OCR**；
+- 生命/能量变化约 0.04 秒解析完，单个技能约 0.08～0.10 秒，头像/属性/名字变化时约 0.13 秒（首次加载约 0.8 秒，之后走缓存）；
+- 状态实时写入 `.cache/live/latest.json`，网页打开 **http://localhost:8000/live** 就能看到双方精灵、生命、能量、技能和变化时间线；
+- 会话日志在 `.cache/live/session_*/state.jsonl`。工具只截图，不读游戏内存、不修改游戏。
 
 常用参数：
 
 ```bash
 .venv-ocr314\Scripts\python live_monitor.py --self-test      # 只识别当前一帧
-.venv-ocr314\Scripts\python live_monitor.py --save-frames    # 保留每张识别用的截图
-.venv-ocr314\Scripts\python live_monitor.py --interval 1.5   # 调整识别间隔
+.venv-ocr314\Scripts\python live_monitor.py --fps 10         # 每 0.1 秒检查一次（默认）
+.venv-ocr314\Scripts\python live_monitor.py --refresh 10     # 每 10 秒强制全量重识别一次
+.venv-ocr314\Scripts\python live_monitor.py --save-events    # 状态变化时保存当前帧，便于复查
+.venv-ocr314\Scripts\python live_monitor.py --wait 600       # 先开监控，等游戏窗口出现
 ```
 
-伤害浮字、自动回合草稿和自动写入对局记录还没做；这一版先验证“实时截图 + 状态识别”是否稳定。
+伤害浮字、自动回合草稿和自动写入对局记录还没做；这一版先验证“0.1 秒快照 + 变化触发解析”能否完整记录战斗状态。
 
 识别整张图片，或识别已经裁成单行的文字图片：
 
